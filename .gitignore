@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Per-developer Claude Code state
+.claude/
+
+# Build artifacts
+build/
+dist/
+
+# Generated assets
+assets/stream_bg.png
+
+# Music + Jennifer caches (mp3s and voice cache are large + per-host)
+music/*.mp3
+music/*.json
+jennifer/voices/
+jennifer/spots/
+
+# Local stream output during M0/M1 smoke testing
+out/
+*.flv
+
+# Local secrets
+.env
