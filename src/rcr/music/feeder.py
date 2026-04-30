@@ -6,12 +6,15 @@ decoder on every track boundary. Instead, we run a *per-track* ffmpeg that
 decodes each mp3 to raw PCM, and we keep the FIFO's write end open across
 tracks so the consumer never sees EOF.
 
-Behaviour:
-    - Glob music/*.mp3 fresh on every loop iteration so dropping new files in
-      lets them join the rotation (this is the v1 of M2's drop-folder ingest —
-      proper auto-tagging arrives in M2 itself).
-    - Random shuffle, infinite loop.
-    - If the directory is empty, write silence so ffmpeg doesn't starve.
+Track selection (M2):
+    - Re-load the tagged library on every iteration (load_library skips mp3s
+      that don't yet have a sidecar — that's how the watcher-based drop-folder
+      ingest stays decoupled from playback).
+    - Pick the next track via the pure selector: ring-buffer dedupe + BPM/
+      energy continuity + soft 40-min mood arc.
+    - If no tagged tracks exist, write silence so ffmpeg doesn't starve.
+      (This is the "fresh checkout, ingest still running" case — the watcher
+      will catch up and tracks will start appearing.)
 
 This is blocking IO; run it from a thread (asyncio.to_thread).
 """
@@ -21,8 +24,11 @@ from __future__ import annotations
 import logging
 import random
 import subprocess
-import time
+from collections import deque
 from pathlib import Path
+
+from rcr.music.selector import ArcState, recent_n, select
+from rcr.music.tracks import Track, load_library
 
 log = logging.getLogger(__name__)
 
@@ -34,12 +40,19 @@ PCM_CHUNK = 8192
 # Bytes-per-second of PCM at 48k stereo s16le = 192_000
 SILENCE_CHUNK_S = 0.25
 SILENCE_CHUNK = b"\x00" * int(SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE * SILENCE_CHUNK_S)
+NO_LIBRARY_SLEEP_S = 5.0
 
 
 class MusicFeeder:
-    def __init__(self, music_dir: Path, fifo_path: Path):
+    def __init__(self, music_dir: Path, fifo_path: Path, *, rng: random.Random | None = None):
         self.music_dir = music_dir
         self.fifo_path = fifo_path
+        self._rng = rng or random.Random()
+        self._arc = ArcState()
+        # Ring buffer is sized for "up to 10 recent" per the architecture; the
+        # selector slices it dynamically based on library size each call.
+        self._ring: deque[Path] = deque(maxlen=10)
+        self._last: Track | None = None
         self._stop = False
 
     def stop(self) -> None:
@@ -54,41 +67,51 @@ class MusicFeeder:
         log.info("opening %s for write (blocks until ffmpeg attaches)…", self.fifo_path)
         with open(self.fifo_path, "wb") as fifo:
             log.info("FIFO open; starting playback")
-            for track in self._iter_tracks():
-                if self._stop:
-                    return
+            while not self._stop:
+                track = self._next_track()
+                if track is None:
+                    self._emit_silence(fifo, NO_LIBRARY_SLEEP_S)
+                    continue
+                self._ring.append(track.path)
                 self._play_track(track, fifo)
+                self._last = track
 
-    def _iter_tracks(self):
-        """Infinite shuffle of mp3s in music_dir, re-globbed each pass."""
-        while not self._stop:
-            tracks = sorted(self.music_dir.glob("*.mp3"))
-            if not tracks:
-                log.warning("no mp3s in %s; writing silence", self.music_dir)
-                yield None  # signal: emit silence for a bit
-                continue
-            random.shuffle(tracks)
-            for t in tracks:
-                yield t
+    def _next_track(self) -> Track | None:
+        library = load_library(self.music_dir)
+        if not library:
+            log.warning("no tagged tracks in %s; writing silence", self.music_dir)
+            return None
+        # Trim the ring buffer to the dynamic recent-N for this library size,
+        # so the selector's view of "recent" matches its formula. The deque
+        # itself is bounded at maxlen=10; this just keeps it from referencing
+        # paths that are no longer relevant after library shrinkage.
+        n_recent = recent_n(len(library))
+        while len(self._ring) > n_recent:
+            self._ring.popleft()
+        return select(library, self._ring, self._last, self._arc, self._rng)
 
-    def _play_track(self, track: Path | None, fifo) -> None:
-        if track is None:
-            # No music available — keep the consumer fed with silence so ffmpeg
-            # doesn't block forever on read.
-            for _ in range(int(5.0 / SILENCE_CHUNK_S)):  # ~5s of silence
-                if self._stop:
-                    return
+    def _emit_silence(self, fifo, seconds: float) -> None:
+        for _ in range(int(seconds / SILENCE_CHUNK_S)):
+            if self._stop:
+                return
+            try:
                 fifo.write(SILENCE_CHUNK)
                 fifo.flush()
-            return
+            except BrokenPipeError:
+                log.warning("FIFO reader went away while writing silence")
+                self._stop = True
+                return
 
-        log.info("now playing: %s", track.name)
+    def _play_track(self, track: Track, fifo) -> None:
+        log.info("now playing: %s [%s] bpm=%.0f energy=%d mood=%s",
+                 track.name, track.fictional_artist, track.bpm, track.energy,
+                 ",".join(track.mood))
         proc = subprocess.Popen(
             [
                 "ffmpeg",
                 "-hide_banner",
                 "-loglevel", "error",
-                "-i", str(track),
+                "-i", str(track.path),
                 "-vn",  # ignore embedded album art
                 "-f", "s16le",
                 "-ar", str(SAMPLE_RATE),
