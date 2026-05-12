@@ -115,16 +115,49 @@ rainy-city-radio/
 - **Voicing/silence symmetry.** If you write voice audio without surrounding silence frames, ffmpeg will desync. The voice feeder must always be writing — silence or speech.
 - **Lore consistency.** Jennifer references the rainy-city universe (Followers of Baal, kung-fu, kidnapped girlfriend, pizza-as-stakes humor). Earnest aesthetic + pulp horror humor. Not gritty, not mean. Don't default to heteronormative framing — Jennifer has a girlfriend, and the universe reflects that.
 
-## Common commands (placeholder)
+## Secrets and per-host state
 
-The Python service does not exist yet. When it does, expected commands:
+**Secrets live in `.env` at the repo root, per-host, never committed.** `.gitignore` excludes `.env` along with all generated per-host artifacts (baked voice mp3s, the music library, the rendered bg). Develop on one machine, deploy/run on another (`homebase`); the keys + caches do not travel via git.
 
-- `python -m rcr.main` — run the streamer (reads YouTube stream key from env)
-- `python -m rcr.tools.render_bg` — regenerate `assets/stream_bg.png` from `static.jpg`
-- `python -m rcr.tools.ingest_track music/foo.mp3` — tag a new track and write its sidecar
-- `pytest` — tests (selector logic, cache key derivation, ChatSource impls with fixtures)
+Expected env vars (only the ones needed for what you're running):
 
-Update this section as those entrypoints become real.
+| Var | Read by | When you need it |
+|---|---|---|
+| `YOUTUBE_STREAM_KEY` | `rcr.streamer.youtube_target_from_env` | Live (non-dry-run) streaming |
+| `NIM_API_KEY` | `rcr.nim.NimClient.from_env` | Offline ingest tagging; later, M4 live scripting |
+| `ELEVENLABS_API_KEY` | `rcr.jennifer.voicer` *(M3 step 2)* | Baking static spots offline |
+| `ELEVENLABS_VOICE_ID` | `rcr.jennifer.voicer` *(M3 step 2)* | Baking static spots offline |
+
+Loading them into the shell before running anything that needs them:
+
+```
+set -a; source .env; set +a
+python -m rcr.main
+```
+
+**Per-host state that isn't in git** (any `.gitignore`-excluded directories may be empty after a fresh clone):
+
+- `music/*.mp3` + `music/*.json` — the playable library and its sidecars
+- `jennifer/spots/` — pre-baked ElevenLabs mp3s for the static spot pool
+- `jennifer/voices/` — disk cache of generated voice lines, sha256-keyed
+- `assets/stream_bg.png` — rendered from `static.jpg`
+
+After a fresh clone or pull on a new host, before the streamer will play anything meaningful:
+
+1. Populate `.env` with the keys you need.
+2. `python -m rcr.tools.render_bg` — produces `assets/stream_bg.png`.
+3. Drop mp3s into `music/` (the watcher in `rcr.tools.ingest_watch` tags them, or run `rcr.tools.ingest_track` per-file).
+4. *(M3 step 2, not yet implemented)* `python -m rcr.tools.generate_spots` — bakes the static spot pool into `jennifer/spots/`.
+5. `python -m rcr.main` — stream.
+
+## Common commands
+
+- `python -m rcr.main` — run the streamer (live to YouTube via `YOUTUBE_STREAM_KEY`).
+- `python -m rcr.main --dry-run --duration 30` — write to `out/live_test.flv` instead. Add `--voice-test-tone` to inject a periodic sine into `voice.fifo` so you can hear the sidechain ducking work without real Jennifer audio.
+- `python -m rcr.tools.render_bg` — regenerate `assets/stream_bg.png` from `static.jpg`.
+- `python -m rcr.tools.ingest_track music/foo.mp3` — tag a new track and write its sidecar.
+- `python -m rcr.tools.ingest_watch` — watch `music/` and ingest dropped mp3s automatically.
+- `pytest` — tests.
 
 ## See also
 
