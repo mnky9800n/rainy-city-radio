@@ -26,9 +26,18 @@ import random
 import subprocess
 from collections import deque
 from pathlib import Path
+from typing import Callable
 
 from rcr.music.selector import ArcState, recent_n, select
 from rcr.music.tracks import Track, load_library
+
+# Callback fired from the music-feeder thread *before* a new track's PCM
+# starts flowing into the FIFO. Receives (previous_track, new_track). The
+# previous is None for the very first track of a run. Implementations must
+# be quick + thread-safe — the feeder is on a blocking IO loop and the
+# event is delivered synchronously. Use loop.call_soon_threadsafe to bridge
+# back to asyncio.
+TrackChangeCallback = Callable[["Track | None", "Track"], None]
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +53,14 @@ NO_LIBRARY_SLEEP_S = 5.0
 
 
 class MusicFeeder:
-    def __init__(self, music_dir: Path, fifo_path: Path, *, rng: random.Random | None = None):
+    def __init__(
+        self,
+        music_dir: Path,
+        fifo_path: Path,
+        *,
+        rng: random.Random | None = None,
+        on_track_change: TrackChangeCallback | None = None,
+    ):
         self.music_dir = music_dir
         self.fifo_path = fifo_path
         self._rng = rng or random.Random()
@@ -54,6 +70,7 @@ class MusicFeeder:
         self._ring: deque[Path] = deque(maxlen=10)
         self._last: Track | None = None
         self._stop = False
+        self._on_track_change = on_track_change
 
     def stop(self) -> None:
         self._stop = True
@@ -73,6 +90,17 @@ class MusicFeeder:
                     self._emit_silence(fifo, NO_LIBRARY_SLEEP_S)
                     continue
                 self._ring.append(track.path)
+                # Fire the change event *before* playback begins — gives the
+                # Jennifer scheduler a window to pick an outro for `_last`
+                # and an intro for `track`, then enqueue them onto the voice
+                # FIFO. The first few seconds of `track` will play under
+                # Jennifer's voice via the existing sidechain ducking.
+                if self._on_track_change is not None:
+                    try:
+                        self._on_track_change(self._last, track)
+                    except Exception:
+                        # Don't let a buggy callback stall playback.
+                        log.exception("on_track_change callback raised")
                 self._play_track(track, fifo)
                 self._last = track
 

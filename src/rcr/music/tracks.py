@@ -80,6 +80,12 @@ class Track:
         fictional_artist for Suno tracks, or None if neither is set."""
         return self.real_artist or self.fictional_artist
 
+    @property
+    def display_title(self) -> str:
+        """The title Jennifer should use on-air: real_title for CC tracks,
+        falling back to the filename stem (which is the Suno convention)."""
+        return self.real_title or self.name
+
 
 def sidecar_path(mp3: Path) -> Path:
     return mp3.with_suffix(".json")
