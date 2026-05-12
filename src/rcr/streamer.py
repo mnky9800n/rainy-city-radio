@@ -53,7 +53,16 @@ class StreamConfig:
     duck_threshold: float = 0.03
     duck_ratio: float = 8.0
     duck_attack_ms: float = 50.0
-    duck_release_ms: float = 500.0
+    # Release is intentionally long. 500ms lets inter-word breath pauses
+    # un-duck the music (mid-sentence pops), which sounds amateurish on a
+    # broadcast. ~2.5s holds the duck through normal speech rhythm and only
+    # releases once Jennifer has actually finished a phrase.
+    duck_release_ms: float = 2500.0
+    # Pinned video bitrate. Without it x264 picks ~2 Mbps for a stillimage,
+    # which YouTube flags as below their 1080p30 minimum (and may quality-gate
+    # the broadcast). 3500 Kbps clears that gate while keeping us at ~57% of
+    # the 2 TB/month DO bandwidth cap (see CLAUDE.md Constraints).
+    video_bitrate_kbps: int = 3500
 
 
 class Streamer:
@@ -119,13 +128,18 @@ class Streamer:
             "-map", "0:v",
             "-map", "[mix]",
             # Video: still image — ultrafast preset and a 4-frame GOP at 2fps
-            # is plenty for a non-moving frame.
+            # is plenty for a non-moving frame. Bitrate is pinned (CBR-ish via
+            # -b:v + -maxrate + -bufsize) so YouTube doesn't quality-gate us;
+            # x264 just pads with extra-keyframe data, near-zero CPU cost.
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-tune", "stillimage",
             "-pix_fmt", "yuv420p",
             "-r", "2",
             "-g", "4",
+            "-b:v", f"{c.video_bitrate_kbps}k",
+            "-maxrate", f"{c.video_bitrate_kbps}k",
+            "-bufsize", f"{c.video_bitrate_kbps * 2}k",
             # Audio: AAC 128k stereo @ 48kHz (matches source rate; no resample).
             "-c:a", "aac",
             "-b:a", "128k",

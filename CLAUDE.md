@@ -15,9 +15,12 @@ This repo deploys to one host: `homebase`, a DigitalOcean droplet.
 - 1 vCPU (no real GPU — virtio only)
 - 1.9 GB RAM + 2 GB swap (treat swap as safety net, not headroom)
 - ~13 GB free disk after swap
+- **2 TB / month outbound bandwidth cap** (current DO tier); overage is ~$0.01/GB. 24/7 streaming at N Kbps eats `N × 324 MB/month` (e.g., 3500 Kbps ≈ 1.13 TB, 6800 Kbps ≈ 2.2 TB → over cap). Leave headroom for rainy-city.com on the same box.
 - Already runs other services (rainy-city.com is on the same box) — be a good tenant
 
 The 1 vCPU is the real constraint. **Architecture must avoid live video re-encoding**: the YouTube stream uses a pre-rendered 1920×1080 PNG looped statically (`-loop 1 -tune stillimage`, ~2fps), so x264 cost is near-zero and the CPU goes to audio mixing. Don't propose anything that re-encodes high-res video, runs an in-process ML model, or spins up parallel ffmpegs.
+
+Video bitrate is pinned at **3500 Kbps** (`StreamConfig.video_bitrate_kbps`) — meets YouTube's 1080p30 minimum and clears their quality warning, while keeping monthly bandwidth ≈57% of the DO cap.
 
 ## Architecture
 
