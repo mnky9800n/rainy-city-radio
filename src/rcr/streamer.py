@@ -47,11 +47,20 @@ class StreamConfig:
     ambient_path: Path
     output_target: str  # full URL or file path
     bed_volume_db: float = -25.0
+    # Jennifer's voice gets boosted before amix so she sits clearly above the
+    # ducked music. amix's default normalize=1 divides each input by N=3,
+    # which on its own leaves voice ~10dB quieter than it sounds at unity;
+    # this gain compensates for that and pushes voice forward in the mix.
+    voice_volume_db: float = 6.0
     # Sidechain compressor parameters. Threshold is in linear amplitude
     # (0..1); 0.03 ≈ -30dB — well above silence-frame noise floor but below
     # any real Jennifer-level speech, so the trigger fires cleanly.
     duck_threshold: float = 0.03
-    duck_ratio: float = 8.0
+    # Ratio controls how much the music drops when voice is present. 12:1 is
+    # deep enough that voice clearly leads the mix (~19dB attenuation at the
+    # configured threshold); lower ratios let music compete and the voice
+    # feels buried.
+    duck_ratio: float = 12.0
     duck_attack_ms: float = 50.0
     # Release is intentionally long. 500ms lets inter-word breath pauses
     # un-duck the music (mid-sentence pops), which sounds amateurish on a
@@ -76,18 +85,19 @@ class Streamer:
     def build_cmd(self) -> list[str]:
         c = self.cfg
         filter_complex = (
-            # Voice splits into a "heard" copy and a sidechain-trigger copy.
+            # Voice splits into a "heard" copy (gets boosted before amix) and
+            # a sidechain-trigger copy (drives the ducker on music).
             f"[3:a]asplit=2[voice_main][voice_sc];"
-            # Music is compressed when voice is present (~12dB for ratio=8 at
-            # the configured threshold). Music input is the *main* into
-            # sidechaincompress; voice_sc is the trigger.
+            f"[voice_main]volume={c.voice_volume_db}dB[voice_out];"
+            # Music is compressed when voice is present. Music input is the
+            # *main* into sidechaincompress; voice_sc is the trigger.
             f"[1:a][voice_sc]sidechaincompress="
             f"threshold={c.duck_threshold}:ratio={c.duck_ratio}:"
             f"attack={c.duck_attack_ms}:release={c.duck_release_ms}[ducked_music];"
             f"[2:a]volume={c.bed_volume_db}dB[bed];"
             # duration=first keeps the mix tied to the music FIFO's lifetime;
             # voice + bed are continuous so they never end on their own.
-            f"[ducked_music][voice_main][bed]"
+            f"[ducked_music][voice_out][bed]"
             f"amix=inputs=3:duration=first:dropout_transition=0[mix]"
         )
         # `-re` pegs each input to its native rate so ffmpeg consumes — and
