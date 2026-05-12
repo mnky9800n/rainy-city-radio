@@ -18,20 +18,36 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import os
 import signal
+import struct
 from pathlib import Path
 
+from rcr.jennifer.feeder import (
+    BYTES_PER_SAMPLE as VOICE_BYTES_PER_SAMPLE,
+    CHANNELS as VOICE_CHANNELS,
+    SAMPLE_RATE as VOICE_SAMPLE_RATE,
+    VoiceFeeder,
+)
 from rcr.music.feeder import MusicFeeder
 from rcr.streamer import StreamConfig, Streamer, youtube_target_from_env
 
 log = logging.getLogger("rcr")
 
-DEFAULT_FIFO = Path("/tmp/rcr/music.fifo")
+DEFAULT_MUSIC_FIFO = Path("/tmp/rcr/music.fifo")
+DEFAULT_VOICE_FIFO = Path("/tmp/rcr/voice.fifo")
 DEFAULT_BG = Path("assets/stream_bg.png")
 DEFAULT_AMBIENT = Path("assets/ambient_rain.mp3")
 DEFAULT_MUSIC_DIR = Path("music")
 DEFAULT_DRY_RUN_OUT = Path("out/live_test.flv")
+
+# Test-tone parameters used only with --voice-test-tone (dry-run verification
+# of sidechain ducking — Jennifer's voice isn't wired yet).
+TEST_TONE_FREQ_HZ = 440.0
+TEST_TONE_DUR_S = 2.0
+TEST_TONE_AMPLITUDE = 0.4  # well above duck_threshold=0.03
+TEST_TONE_INTERVAL_S = 8.0
 
 
 def ensure_fifo(path: Path) -> None:
@@ -46,21 +62,27 @@ async def run(
     bg: Path,
     ambient: Path,
     music_dir: Path,
-    fifo: Path,
+    music_fifo: Path,
+    voice_fifo: Path,
     output_target: str,
     duration: float | None,
+    voice_test_tone: bool,
 ) -> None:
-    ensure_fifo(fifo)
+    ensure_fifo(music_fifo)
+    ensure_fifo(voice_fifo)
 
-    feeder = MusicFeeder(music_dir, fifo)
+    music_feeder = MusicFeeder(music_dir, music_fifo)
+    voice_feeder = VoiceFeeder(voice_fifo)
     streamer = Streamer(StreamConfig(
         bg_path=bg,
-        music_fifo=fifo,
+        music_fifo=music_fifo,
+        voice_fifo=voice_fifo,
         ambient_path=ambient,
         output_target=output_target,
     ))
 
-    feeder_task = asyncio.create_task(asyncio.to_thread(feeder.run), name="feeder")
+    music_task = asyncio.create_task(asyncio.to_thread(music_feeder.run), name="music_feeder")
+    voice_task = asyncio.create_task(asyncio.to_thread(voice_feeder.run), name="voice_feeder")
     streamer_task = asyncio.create_task(streamer.run(), name="streamer")
 
     loop = asyncio.get_running_loop()
@@ -80,17 +102,59 @@ async def run(
             stop_event.set()
         asyncio.create_task(_autostop(), name="autostop")
 
+    if voice_test_tone:
+        asyncio.create_task(
+            _emit_test_tones(voice_feeder, stop_event),
+            name="voice_test_tone",
+        )
+
     await stop_event.wait()
 
-    feeder.stop()
+    music_feeder.stop()
+    voice_feeder.stop()
     await streamer.stop()
-    # The feeder may be blocked in fifo.write() until ffmpeg drains; give it a
-    # moment, then move on. The thread is daemonic-by-virtue-of-being-a-task.
-    try:
-        await asyncio.wait_for(feeder_task, timeout=5.0)
-    except asyncio.TimeoutError:
-        log.warning("feeder thread didn't exit cleanly within 5s")
+    # Feeders may be blocked in fifo.write() until ffmpeg drains; give them
+    # a moment, then move on. The threads are daemonic-by-virtue-of-being-a-task.
+    for name, task in (("music", music_task), ("voice", voice_task)):
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
+            log.warning("%s feeder thread didn't exit cleanly within 5s", name)
     await streamer_task
+
+
+def _sine_pcm(freq_hz: float, dur_s: float, amplitude: float) -> bytes:
+    """Generate s16le stereo PCM at VOICE_SAMPLE_RATE for test-tone bursts."""
+    n_frames = int(VOICE_SAMPLE_RATE * dur_s)
+    peak = int(amplitude * 32767)
+    two_pi_f_over_sr = 2.0 * math.pi * freq_hz / VOICE_SAMPLE_RATE
+    out = bytearray(n_frames * VOICE_CHANNELS * VOICE_BYTES_PER_SAMPLE)
+    pack_into = struct.pack_into
+    for i in range(n_frames):
+        v = int(peak * math.sin(two_pi_f_over_sr * i))
+        offset = i * VOICE_CHANNELS * VOICE_BYTES_PER_SAMPLE
+        for ch in range(VOICE_CHANNELS):
+            pack_into("<h", out, offset + ch * VOICE_BYTES_PER_SAMPLE, v)
+    return bytes(out)
+
+
+async def _emit_test_tones(feeder: VoiceFeeder, stop_event: asyncio.Event) -> None:
+    """Drop a sine burst onto the voice queue every TEST_TONE_INTERVAL_S.
+
+    Lets you verify in dry-run that the sidechain trigger ducks the music
+    when the voice channel produces signal. Real Jennifer audio replaces
+    this in M3 step 2.
+    """
+    tone = _sine_pcm(TEST_TONE_FREQ_HZ, TEST_TONE_DUR_S, TEST_TONE_AMPLITUDE)
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=TEST_TONE_INTERVAL_S)
+            return
+        except asyncio.TimeoutError:
+            pass
+        log.info("voice-test-tone: injecting %.1fs sine @ %.0fHz",
+                 TEST_TONE_DUR_S, TEST_TONE_FREQ_HZ)
+        feeder.enqueue_pcm(tone)
 
 
 def main() -> None:
@@ -98,12 +162,16 @@ def main() -> None:
     p.add_argument("--bg", type=Path, default=DEFAULT_BG)
     p.add_argument("--ambient", type=Path, default=DEFAULT_AMBIENT)
     p.add_argument("--music-dir", type=Path, default=DEFAULT_MUSIC_DIR)
-    p.add_argument("--fifo", type=Path, default=DEFAULT_FIFO)
+    p.add_argument("--music-fifo", type=Path, default=DEFAULT_MUSIC_FIFO)
+    p.add_argument("--voice-fifo", type=Path, default=DEFAULT_VOICE_FIFO)
     p.add_argument("--dry-run", action="store_true",
                    help="Write FLV to out/live_test.flv instead of YouTube RTMP.")
     p.add_argument("--dry-run-out", type=Path, default=DEFAULT_DRY_RUN_OUT)
     p.add_argument("--duration", type=float, default=None,
                    help="Stop automatically after N seconds (handy with --dry-run).")
+    p.add_argument("--voice-test-tone", action="store_true",
+                   help="Periodically inject a sine burst into voice.fifo so "
+                        "you can hear the sidechain ducking work in dry-run.")
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args()
 
@@ -128,9 +196,11 @@ def main() -> None:
         bg=args.bg,
         ambient=args.ambient,
         music_dir=args.music_dir,
-        fifo=args.fifo,
+        music_fifo=args.music_fifo,
+        voice_fifo=args.voice_fifo,
         output_target=target,
         duration=args.duration,
+        voice_test_tone=args.voice_test_tone,
     ))
 
 

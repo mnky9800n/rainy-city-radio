@@ -4,14 +4,19 @@ ONE ffmpeg process is the architectural invariant — Python feeds it via FIFOs 
 never mixes audio itself. This module owns that subprocess: builds the command
 line, spawns it, and restarts it if it dies.
 
-M1 inputs:
+M3 inputs:
     [0] Looped PNG (the pre-rendered 1920x1080 stream background, ~2fps).
     [1] s16le PCM stereo at 48kHz read from /tmp/rcr/music.fifo.
     [2] Ambient rain bed, looped indefinitely.
+    [3] s16le PCM stereo at 48kHz read from /tmp/rcr/voice.fifo. The voice
+        feeder writes silence frames whenever Jennifer isn't speaking, so this
+        input is always producing a signal — never EOF until shutdown.
 
-Filter graph (M1, no ducking yet — that arrives in M3 with voice):
-    [bed] = [2] @ -25dB
-    [mix] = amix(music, bed)
+Filter graph:
+    [voice] is asplit into [voice_main] (heard in the mix) and [voice_sc]
+    (sidechain trigger). [voice_sc] drives sidechaincompress on [music] to
+    duck music ~12dB whenever Jennifer speaks. [bed] is the ambient rain at
+    -25dB. The final mix is ducked_music + voice + bed.
 
 Output: FLV. RTMP to YouTube live, OR a local .flv file when in dry-run mode
 (safer for iteration — no risk of burning YouTube live attempts).
@@ -38,9 +43,17 @@ RESTART_BACKOFF_S = 3.0
 class StreamConfig:
     bg_path: Path
     music_fifo: Path
+    voice_fifo: Path
     ambient_path: Path
     output_target: str  # full URL or file path
     bed_volume_db: float = -25.0
+    # Sidechain compressor parameters. Threshold is in linear amplitude
+    # (0..1); 0.03 ≈ -30dB — well above silence-frame noise floor but below
+    # any real Jennifer-level speech, so the trigger fires cleanly.
+    duck_threshold: float = 0.03
+    duck_ratio: float = 8.0
+    duck_attack_ms: float = 50.0
+    duck_release_ms: float = 500.0
 
 
 class Streamer:
@@ -54,8 +67,19 @@ class Streamer:
     def build_cmd(self) -> list[str]:
         c = self.cfg
         filter_complex = (
+            # Voice splits into a "heard" copy and a sidechain-trigger copy.
+            f"[3:a]asplit=2[voice_main][voice_sc];"
+            # Music is compressed when voice is present (~12dB for ratio=8 at
+            # the configured threshold). Music input is the *main* into
+            # sidechaincompress; voice_sc is the trigger.
+            f"[1:a][voice_sc]sidechaincompress="
+            f"threshold={c.duck_threshold}:ratio={c.duck_ratio}:"
+            f"attack={c.duck_attack_ms}:release={c.duck_release_ms}[ducked_music];"
             f"[2:a]volume={c.bed_volume_db}dB[bed];"
-            f"[1:a][bed]amix=inputs=2:duration=first:dropout_transition=0[mix]"
+            # duration=first keeps the mix tied to the music FIFO's lifetime;
+            # voice + bed are continuous so they never end on their own.
+            f"[ducked_music][voice_main][bed]"
+            f"amix=inputs=3:duration=first:dropout_transition=0[mix]"
         )
         # `-re` pegs each input to its native rate so ffmpeg consumes — and
         # therefore produces — at wall-clock pace. Without it the streamer
@@ -83,6 +107,14 @@ class Streamer:
             "-re",
             "-stream_loop", "-1",
             "-i", str(c.ambient_path),
+            # [3] voice PCM via FIFO. The voice feeder writes silence when
+            # Jennifer isn't speaking, so this input never EOFs.
+            "-thread_queue_size", "512",
+            "-re",
+            "-f", "s16le",
+            "-ar", str(SAMPLE_RATE),
+            "-ac", str(CHANNELS),
+            "-i", str(c.voice_fifo),
             "-filter_complex", filter_complex,
             "-map", "0:v",
             "-map", "[mix]",
