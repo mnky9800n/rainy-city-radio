@@ -125,8 +125,8 @@ Expected env vars (only the ones needed for what you're running):
 |---|---|---|
 | `YOUTUBE_STREAM_KEY` | `rcr.streamer.youtube_target_from_env` | Live (non-dry-run) streaming |
 | `NIM_API_KEY` | `rcr.nim.NimClient.from_env` | Offline ingest tagging; later, M4 live scripting |
-| `ELEVENLABS_API_KEY` | `rcr.jennifer.voicer` *(M3 step 2)* | Baking static spots offline |
-| `ELEVENLABS_VOICE_ID` | `rcr.jennifer.voicer` *(M3 step 2)* | Baking static spots offline |
+| `ELEVENLABS_API_KEY` | `rcr.jennifer.voicer.Voicer.from_env` | Baking static spots offline |
+| `ELEVENLABS_VOICE_ID` | `rcr.jennifer.voicer.Voicer.from_env` | Baking static spots offline |
 
 Loading them into the shell before running anything that needs them:
 
@@ -147,16 +147,17 @@ After a fresh clone or pull on a new host, before the streamer will play anythin
 1. Populate `.env` with the keys you need.
 2. `python -m rcr.tools.render_bg` — produces `assets/stream_bg.png`.
 3. Drop mp3s into `music/` (the watcher in `rcr.tools.ingest_watch` tags them, or run `rcr.tools.ingest_track` per-file).
-4. *(M3 step 2, not yet implemented)* `python -m rcr.tools.generate_spots` — bakes the static spot pool into `jennifer/spots/`.
+4. `python -m rcr.tools.generate_spots` — bakes the static spot pool into `jennifer/spots/`. Idempotent (sha256-keyed cache). Pass `--dry-run` to preview without calling ElevenLabs.
 5. `python -m rcr.main` — stream.
 
 ## Common commands
 
 - `python -m rcr.main` — run the streamer (live to YouTube via `YOUTUBE_STREAM_KEY`).
-- `python -m rcr.main --dry-run --duration 30` — write to `out/live_test.flv` instead. Add `--voice-test-tone` to inject a periodic sine into `voice.fifo` so you can hear the sidechain ducking work without real Jennifer audio.
+- `python -m rcr.main --dry-run --duration 30` — write to `out/live_test.flv` instead. Add `--voice-test-tone` to inject a periodic sine into `voice.fifo` so you can hear the sidechain ducking work without real Jennifer audio. Add `--no-jennifer` to disable the spot scheduler (music-only).
 - `python -m rcr.tools.render_bg` — regenerate `assets/stream_bg.png` from `static.jpg`.
 - `python -m rcr.tools.ingest_track music/foo.mp3` — tag a new track and write its sidecar.
 - `python -m rcr.tools.ingest_watch` — watch `music/` and ingest dropped mp3s automatically.
+- `python -m rcr.tools.generate_spots` — bake the static Jennifer spot pool into `jennifer/spots/`. `--dry-run` previews without calling ElevenLabs.
 - `pytest` — tests.
 
 ## See also

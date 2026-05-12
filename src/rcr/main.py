@@ -30,6 +30,7 @@ from rcr.jennifer.feeder import (
     SAMPLE_RATE as VOICE_SAMPLE_RATE,
     VoiceFeeder,
 )
+from rcr.jennifer.scheduler import JenniferScheduler
 from rcr.music.feeder import MusicFeeder
 from rcr.streamer import StreamConfig, Streamer, youtube_target_from_env
 
@@ -40,6 +41,7 @@ DEFAULT_VOICE_FIFO = Path("/tmp/rcr/voice.fifo")
 DEFAULT_BG = Path("assets/stream_bg.png")
 DEFAULT_AMBIENT = Path("assets/ambient_rain.mp3")
 DEFAULT_MUSIC_DIR = Path("music")
+DEFAULT_SPOTS_DIR = Path("jennifer/spots")
 DEFAULT_DRY_RUN_OUT = Path("out/live_test.flv")
 
 # Test-tone parameters used only with --voice-test-tone (dry-run verification
@@ -62,11 +64,13 @@ async def run(
     bg: Path,
     ambient: Path,
     music_dir: Path,
+    spots_dir: Path,
     music_fifo: Path,
     voice_fifo: Path,
     output_target: str,
     duration: float | None,
     voice_test_tone: bool,
+    no_jennifer: bool,
 ) -> None:
     ensure_fifo(music_fifo)
     ensure_fifo(voice_fifo)
@@ -80,10 +84,18 @@ async def run(
         ambient_path=ambient,
         output_target=output_target,
     ))
+    jennifer = (
+        None if no_jennifer
+        else JenniferScheduler(voice_feeder, spots_dir=spots_dir)
+    )
 
     music_task = asyncio.create_task(asyncio.to_thread(music_feeder.run), name="music_feeder")
     voice_task = asyncio.create_task(asyncio.to_thread(voice_feeder.run), name="voice_feeder")
     streamer_task = asyncio.create_task(streamer.run(), name="streamer")
+    jennifer_task = (
+        asyncio.create_task(jennifer.run(), name="jennifer_scheduler")
+        if jennifer is not None else None
+    )
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
@@ -110,9 +122,16 @@ async def run(
 
     await stop_event.wait()
 
+    if jennifer is not None:
+        jennifer.stop()
     music_feeder.stop()
     voice_feeder.stop()
     await streamer.stop()
+    if jennifer_task is not None:
+        try:
+            await asyncio.wait_for(jennifer_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            log.warning("jennifer scheduler didn't exit cleanly within 5s")
     # Feeders may be blocked in fifo.write() until ffmpeg drains; give them
     # a moment, then move on. The threads are daemonic-by-virtue-of-being-a-task.
     for name, task in (("music", music_task), ("voice", voice_task)):
@@ -162,8 +181,12 @@ def main() -> None:
     p.add_argument("--bg", type=Path, default=DEFAULT_BG)
     p.add_argument("--ambient", type=Path, default=DEFAULT_AMBIENT)
     p.add_argument("--music-dir", type=Path, default=DEFAULT_MUSIC_DIR)
+    p.add_argument("--spots-dir", type=Path, default=DEFAULT_SPOTS_DIR)
     p.add_argument("--music-fifo", type=Path, default=DEFAULT_MUSIC_FIFO)
     p.add_argument("--voice-fifo", type=Path, default=DEFAULT_VOICE_FIFO)
+    p.add_argument("--no-jennifer", action="store_true",
+                   help="Disable Jennifer scheduler (music-only). Voice FIFO "
+                        "still carries silence so the streamer keeps running.")
     p.add_argument("--dry-run", action="store_true",
                    help="Write FLV to out/live_test.flv instead of YouTube RTMP.")
     p.add_argument("--dry-run-out", type=Path, default=DEFAULT_DRY_RUN_OUT)
@@ -196,11 +219,13 @@ def main() -> None:
         bg=args.bg,
         ambient=args.ambient,
         music_dir=args.music_dir,
+        spots_dir=args.spots_dir,
         music_fifo=args.music_fifo,
         voice_fifo=args.voice_fifo,
         output_target=target,
         duration=args.duration,
         voice_test_tone=args.voice_test_tone,
+        no_jennifer=args.no_jennifer,
     ))
 
 
