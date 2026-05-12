@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 
 from rcr.music.analyze import analyze
-from rcr.music.tracks import MOOD_VOCAB, Track, save
+from rcr.music.tracks import MOOD_VOCAB, Track, load_cc_metadata, save
 from rcr.nim import NimClient, NimError
 
 log = logging.getLogger(__name__)
@@ -56,12 +56,23 @@ def ingest(mp3: Path, nim: NimClient | None = None) -> Track:
     if nim is None:
         nim = NimClient.from_env()
 
+    # Carry forward any CC-attribution fields that were written into the
+    # sidecar at download time. We do this *before* save() overwrites it.
+    cc = load_cc_metadata(mp3)
+
     log.info("analyzing %s", mp3.name)
     a = analyze(mp3)
     log.info("  bpm=%.1f duration=%.0fs onset=%.2f", a.bpm, a.duration, a.onset_strength)
 
+    # For CC tracks we already have a real artist on record — don't store
+    # NIM's invention. We still call _tag() because we want mood + energy.
+    use_fictional_artist = cc.get("real_artist") is None
+
     log.info("tagging via NIM")
-    tags = _tag(nim, mp3.stem, a.bpm, a.onset_strength, a.duration)
+    tags = _tag(
+        nim, mp3.stem, a.bpm, a.onset_strength, a.duration,
+        want_fictional_artist=use_fictional_artist,
+    )
 
     track = Track(
         path=mp3,
@@ -70,15 +81,29 @@ def ingest(mp3: Path, nim: NimClient | None = None) -> Track:
         mood=tuple(tags["mood"]),
         duration=a.duration,
         onset_strength=a.onset_strength,
-        fictional_artist=tags["fictional_artist"],
+        fictional_artist=tags.get("fictional_artist") if use_fictional_artist else None,
+        real_title=cc.get("real_title"),
+        real_artist=cc.get("real_artist"),
+        release=cc.get("release"),
+        source_url=cc.get("source_url"),
+        license=cc.get("license"),
+        attribution=cc.get("attribution"),
     )
     save(track)
     log.info("  energy=%d mood=%s artist=%r",
-             track.energy, ",".join(track.mood), track.fictional_artist)
+             track.energy, ",".join(track.mood), track.display_artist)
     return track
 
 
-def _tag(nim: NimClient, title: str, bpm: float, onset: float, duration: float) -> dict:
+def _tag(
+    nim: NimClient,
+    title: str,
+    bpm: float,
+    onset: float,
+    duration: float,
+    *,
+    want_fictional_artist: bool = True,
+) -> dict:
     user = USER_PROMPT_TEMPLATE.format(
         title=title,
         bpm=bpm,
@@ -87,14 +112,13 @@ def _tag(nim: NimClient, title: str, bpm: float, onset: float, duration: float) 
         vocab=", ".join(MOOD_VOCAB),
     )
     raw = nim.chat_json(SYSTEM_PROMPT, user, max_tokens=200, temperature=0.5)
-    return _validate(raw)
+    return _validate(raw, want_fictional_artist=want_fictional_artist)
 
 
-def _validate(raw: dict) -> dict:
+def _validate(raw: dict, *, want_fictional_artist: bool = True) -> dict:
     try:
         energy = int(raw["energy"])
         mood_in = raw["mood"]
-        artist = str(raw["fictional_artist"]).strip()
     except (KeyError, ValueError, TypeError) as e:
         raise NimError(f"NIM tag response missing/invalid keys: {e}; raw={raw!r}") from e
 
@@ -111,7 +135,16 @@ def _validate(raw: dict) -> dict:
     if not 1 <= len(mood) <= 6:
         # Tolerate slight over/under count, but not zero.
         raise NimError(f"mood ended up empty after vocab filter: {mood_in!r}")
-    if not artist:
-        raise NimError("fictional_artist is empty")
 
-    return {"energy": energy, "mood": mood, "fictional_artist": artist}
+    out: dict = {"energy": energy, "mood": mood}
+
+    if want_fictional_artist:
+        try:
+            artist = str(raw["fictional_artist"]).strip()
+        except (KeyError, ValueError, TypeError) as e:
+            raise NimError(f"NIM tag response missing fictional_artist: {e}; raw={raw!r}") from e
+        if not artist:
+            raise NimError("fictional_artist is empty")
+        out["fictional_artist"] = artist
+
+    return out

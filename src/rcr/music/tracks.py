@@ -10,12 +10,25 @@ The sidecar holds the offline-computed metadata the selector needs:
     duration            seconds (librosa)
     onset_strength      mean onset envelope (librosa) — fed to NIM as a
                         non-title-based intensity hint
-    fictional_artist    NIM-imagined artist name for Jennifer to attribute
+    fictional_artist    NIM-imagined artist name (Suno tracks); None for CC
+                        tracks where a real artist is known
     ingest_version      schema version, lets us re-ingest selectively if the
                         algorithm changes meaningfully
     ingested_at         ISO timestamp; informational
 
-Tracks without a sidecar are excluded from selection — see selector.py.
+Optional Creative-Commons metadata (set for tracks pulled from external CC
+sources; None for in-house/Suno tracks):
+
+    real_title          on-record title from the source
+    real_artist         on-record artist
+    release             album / EP / netlabel release name
+    source_url          page where the track lives (for verification + DJ patter)
+    license             exact CC license string (e.g. "CC BY-NC-ND 3.0")
+    attribution         the ready-to-display credit Jennifer / the channel
+                        description can use verbatim
+
+Tracks without a sidecar (or with a sidecar missing the required audio-
+analysis fields) are excluded from selection — see selector.py.
 """
 
 from __future__ import annotations
@@ -44,13 +57,28 @@ class Track:
     mood: tuple[str, ...]
     duration: float
     onset_strength: float
-    fictional_artist: str
+    # Optional: in-universe NIM-imagined artist (Suno tracks). None for tracks
+    # with a known real_artist from a CC source.
+    fictional_artist: str | None = None
+    # Optional Creative-Commons attribution metadata. See module docstring.
+    real_title: str | None = None
+    real_artist: str | None = None
+    release: str | None = None
+    source_url: str | None = None
+    license: str | None = None
+    attribution: str | None = None
     ingest_version: int = INGEST_VERSION
     ingested_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     @property
     def name(self) -> str:
         return self.path.stem
+
+    @property
+    def display_artist(self) -> str | None:
+        """The name Jennifer should use on-air: real_artist for CC tracks,
+        fictional_artist for Suno tracks, or None if neither is set."""
+        return self.real_artist or self.fictional_artist
 
 
 def sidecar_path(mp3: Path) -> Path:
@@ -64,8 +92,21 @@ def save(track: Track) -> None:
     sidecar_path(track.path).write_text(json.dumps(data, indent=2) + "\n")
 
 
+def _opt_str(data: dict, key: str) -> str | None:
+    v = data.get(key)
+    if v is None or v == "":
+        return None
+    return str(v)
+
+
 def load(mp3: Path) -> Track | None:
-    """Load the sidecar for an mp3, or None if missing/invalid/old version."""
+    """Load the sidecar for an mp3, or None if missing/invalid/old version.
+
+    Returns None for sidecars that are missing the required audio-analysis
+    fields — that's the "downloaded but not yet ingested" state for CC tracks.
+    Running `python -m rcr.tools.ingest_track --all` fills those in and the
+    track becomes selectable.
+    """
     sp = sidecar_path(mp3)
     if not sp.exists():
         return None
@@ -83,12 +124,36 @@ def load(mp3: Path) -> Track | None:
             mood=tuple(data["mood"]),
             duration=float(data["duration"]),
             onset_strength=float(data["onset_strength"]),
-            fictional_artist=str(data["fictional_artist"]),
+            fictional_artist=_opt_str(data, "fictional_artist"),
+            real_title=_opt_str(data, "real_title"),
+            real_artist=_opt_str(data, "real_artist"),
+            release=_opt_str(data, "release"),
+            source_url=_opt_str(data, "source_url"),
+            license=_opt_str(data, "license"),
+            attribution=_opt_str(data, "attribution"),
             ingest_version=int(data["ingest_version"]),
             ingested_at=str(data["ingested_at"]),
         )
     except (KeyError, ValueError, TypeError):
         return None
+
+
+def load_cc_metadata(mp3: Path) -> dict[str, str | None]:
+    """Read just the CC-attribution fields from a sidecar (if any), without
+    requiring the audio-analysis fields. Used by ingest to carry CC metadata
+    forward across re-tagging."""
+    sp = sidecar_path(mp3)
+    if not sp.exists():
+        return {}
+    try:
+        data = json.loads(sp.read_text())
+    except json.JSONDecodeError:
+        return {}
+    return {
+        key: _opt_str(data, key)
+        for key in ("real_title", "real_artist", "release",
+                    "source_url", "license", "attribution")
+    }
 
 
 def load_library(music_dir: Path) -> list[Track]:
