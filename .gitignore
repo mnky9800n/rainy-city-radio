@@ -23,6 +23,8 @@ music/*.json
 jennifer/voices/
 jennifer/spots/
 jennifer/track_intros/
+jennifer/commercials/
+jennifer/commercial_beds/
 
 # NIM-generated draft commercials (overwritten on every bake-tool run;
 # curated keepers live in a separate hand-edited commercials.py).
