@@ -37,7 +37,7 @@ import random
 from pathlib import Path
 
 from rcr.jennifer.feeder import VoiceFeeder
-from rcr.jennifer.spot_player import play_mp3
+from rcr.jennifer.player import JenniferPlayer
 from rcr.jennifer.spots import SPOTS, Category, Spot, category_for_hour
 from rcr.music.tracks import Track, load_library
 
@@ -131,6 +131,33 @@ def pick_baked_intro_or_outro(
     return rng.choice(candidates) if candidates else None
 
 
+def select_transition_segments(
+    prev: Track | None,
+    current: Track,
+    intros_dir: Path,
+    rng: random.Random,
+    intro_chance: float,
+    outro_chance: float,
+) -> list[Path]:
+    """Roll dice and return the ordered list of voice mp3s to play at a transition.
+
+    Pure-ish (filesystem read + rng); the scheduler hands the result to
+    `JenniferPlayer.play_sequence`. Outro of the just-finished track plays
+    first (if rolled and baked), then intro of the new track (same).
+    Either or both may be absent — empty list means a silent transition.
+    """
+    segments: list[Path] = []
+    if prev is not None and rng.random() < outro_chance:
+        outro = pick_baked_intro_or_outro(prev, "outro", intros_dir, rng)
+        if outro is not None:
+            segments.append(outro)
+    if rng.random() < intro_chance:
+        intro = pick_baked_intro_or_outro(current, "intro", intros_dir, rng)
+        if intro is not None:
+            segments.append(intro)
+    return segments
+
+
 class JenniferScheduler:
     def __init__(
         self,
@@ -152,6 +179,7 @@ class JenniferScheduler:
         test_intros_music_dir: Path | None = None,
     ):
         self.voice_feeder = voice_feeder
+        self.player = JenniferPlayer(voice_feeder)
         self.spots_dir = spots_dir
         self.intros_dir = intros_dir
         self.rng = rng or random.Random()
@@ -252,27 +280,20 @@ class JenniferScheduler:
         )
 
     async def _play_transition(self, prev: Track | None, current: Track) -> None:
-        """Roll dice for outro (prev) + intro (current); play either or both."""
-        if prev is not None and self.rng.random() < self.outro_chance:
-            mp3 = pick_baked_intro_or_outro(prev, "outro", self.intros_dir, self.rng)
-            if mp3 is not None:
-                log.info("transition outro: %s", mp3.name)
-                try:
-                    await play_mp3(self.voice_feeder, mp3)
-                except Exception:
-                    log.exception("outro playback failed for %s", prev.name)
-            else:
-                log.debug("no baked outro for %s", prev.name)
-        if self.rng.random() < self.intro_chance:
-            mp3 = pick_baked_intro_or_outro(current, "intro", self.intros_dir, self.rng)
-            if mp3 is not None:
-                log.info("transition intro: %s", mp3.name)
-                try:
-                    await play_mp3(self.voice_feeder, mp3)
-                except Exception:
-                    log.exception("intro playback failed for %s", current.name)
-            else:
-                log.debug("no baked intro for %s", current.name)
+        """Pick + play the outro/intro segments for a track change."""
+        segments = select_transition_segments(
+            prev, current, self.intros_dir, self.rng,
+            self.intro_chance, self.outro_chance,
+        )
+        if not segments:
+            log.debug("transition %s→%s: silent (no rolled/baked segments)",
+                      prev.name if prev else "(none)", current.name)
+            return
+        log.info("transition: %s", " → ".join(p.name for p in segments))
+        try:
+            await self.player.play_sequence(segments)
+        except Exception:
+            log.exception("transition playback failed for %s", current.name)
 
     async def _tick(self) -> None:
         available = available_spots(self.spots_dir)
@@ -287,7 +308,7 @@ class JenniferScheduler:
         if spot is None:
             return
         try:
-            await play_mp3(self.voice_feeder, available[spot.id])
+            await self.player.play_mp3(available[spot.id])
         except Exception:
             # Don't let one bad spot kill the scheduler — log and move on.
             log.exception("failed playing spot %s", spot.id)

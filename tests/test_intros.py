@@ -22,7 +22,7 @@ from rcr.jennifer.intros import (
     outro_release,
     outro_simple,
 )
-from rcr.jennifer.scheduler import pick_baked_intro_or_outro
+from rcr.jennifer.scheduler import pick_baked_intro_or_outro, select_transition_segments
 from rcr.music.tracks import Track
 
 
@@ -213,3 +213,63 @@ def test_pick_baked_rejects_empty_files(tmp_path):
 def test_pick_baked_invalid_kind_raises():
     with pytest.raises(ValueError):
         pick_baked_intro_or_outro(make_cc_track(), "preview", Path("."), Random(0))
+
+
+# ---------------------------------------------------------------------------
+# select_transition_segments
+# ---------------------------------------------------------------------------
+
+def test_select_transition_zero_chance_returns_empty(tmp_path):
+    intros_dir = fake_bake(
+        tmp_path, "Domeneko - Rain",
+        ["intro_simple", "outro_simple"],
+    )
+    out = select_transition_segments(
+        prev=make_cc_track(), current=make_cc_track(),
+        intros_dir=intros_dir, rng=Random(0),
+        intro_chance=0.0, outro_chance=0.0,
+    )
+    assert out == []
+
+
+def test_select_transition_full_chance_includes_both(tmp_path):
+    intros_dir = fake_bake(
+        tmp_path, "Domeneko - Rain",
+        ["intro_simple", "outro_simple"],
+    )
+    out = select_transition_segments(
+        prev=make_cc_track(), current=make_cc_track(),
+        intros_dir=intros_dir, rng=Random(0),
+        intro_chance=1.0, outro_chance=1.0,
+    )
+    assert len(out) == 2
+    # Outro comes first (talks about just-finished), intro second.
+    assert "__outro_" in out[0].name
+    assert "__intro_" in out[1].name
+
+
+def test_select_transition_skips_outro_when_prev_is_none(tmp_path):
+    """First track of a stream has no prev — never produce an outro segment."""
+    intros_dir = fake_bake(
+        tmp_path, "Domeneko - Rain",
+        ["intro_simple", "outro_simple"],
+    )
+    out = select_transition_segments(
+        prev=None, current=make_cc_track(),
+        intros_dir=intros_dir, rng=Random(0),
+        intro_chance=1.0, outro_chance=1.0,
+    )
+    assert len(out) == 1
+    assert "__intro_" in out[0].name
+
+
+def test_select_transition_skips_missing_baked_content(tmp_path):
+    """If the dice roll yes but nothing's baked for that track, no segment is added."""
+    intros_dir = tmp_path / "track_intros"
+    intros_dir.mkdir()
+    out = select_transition_segments(
+        prev=make_cc_track(), current=make_cc_track(),
+        intros_dir=intros_dir, rng=Random(0),
+        intro_chance=1.0, outro_chance=1.0,
+    )
+    assert out == []
