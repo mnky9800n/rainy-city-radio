@@ -76,6 +76,41 @@ def test_different_voice_id_different_cache_entry(tmp_path, stub_http):
     assert len(stub_http) == 2
 
 
+def test_synthesize_override_voice_id(tmp_path, stub_http):
+    """Per-call voice_id override produces a separate cache entry from the
+    Voicer's default voice and hits the right ElevenLabs URL."""
+    v = Voicer(api_key="k", voice_id="jennifer", cache_dir=tmp_path / "voices")
+    p_default = v.synthesize("hello")
+    p_override = v.synthesize("hello", voice_id="other")
+    assert p_default != p_override
+    assert len(stub_http) == 2
+    # The second call should have hit the override-voice URL.
+    assert "jennifer" in stub_http[0]["url"]
+    assert "other" in stub_http[1]["url"]
+
+
+def test_synthesize_override_voice_id_is_cached_independently(tmp_path, stub_http):
+    """Calling synthesize with the same override twice hits the cache; the
+    default voice is NOT served from the override's cache entry."""
+    v = Voicer(api_key="k", voice_id="jennifer", cache_dir=tmp_path / "voices")
+    v.synthesize("hello", voice_id="other")
+    v.synthesize("hello", voice_id="other")  # cache hit
+    assert len(stub_http) == 1
+    # Default-voice request is a miss because it's a different cache entry.
+    v.synthesize("hello")
+    assert len(stub_http) == 2
+
+
+def test_cache_path_respects_voice_id_override(tmp_path):
+    """cache_path() should return the override-voice path when voice_id is
+    passed, mirroring synthesize()'s behavior. Used by bake tools that want
+    to check "is this baked already?" before calling synthesize."""
+    v = Voicer(api_key="k", voice_id="jennifer", cache_dir=tmp_path / "voices")
+    default_path = v.cache_path("hello")
+    override_path = v.cache_path("hello", voice_id="other")
+    assert default_path != override_path
+
+
 def test_partial_write_is_atomic(tmp_path, monkeypatch):
     """If the API call fails after a partial write would have happened, the
     cache must not contain a half-baked .mp3 file that a later run trusts."""
