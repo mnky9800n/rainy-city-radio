@@ -73,6 +73,7 @@ async def run(
     duration: float | None,
     voice_test_tone: bool,
     no_jennifer: bool,
+    no_music: bool,
     test_intros_interval: float | None,
 ) -> None:
     ensure_fifo(music_fifo)
@@ -97,13 +98,15 @@ async def run(
     # MusicFeeder takes the scheduler's callback so it can fire on track
     # changes. In test-intros mode the synthetic-transition loop is the
     # sole source, so we skip wiring the real callback. With --no-jennifer
-    # there's no scheduler at all.
-    if jennifer is None or test_intros_interval is not None:
+    # there's no scheduler at all. With --no-music the feeder pumps silence
+    # (no transitions either).
+    if jennifer is None or test_intros_interval is not None or no_music:
         track_change_cb = None
     else:
         track_change_cb = jennifer.track_change_callback
     music_feeder = MusicFeeder(
-        music_dir, music_fifo, on_track_change=track_change_cb,
+        music_dir, music_fifo,
+        on_track_change=track_change_cb, silent_mode=no_music,
     )
 
     music_task = asyncio.create_task(asyncio.to_thread(music_feeder.run), name="music_feeder")
@@ -205,6 +208,11 @@ def main() -> None:
     p.add_argument("--no-jennifer", action="store_true",
                    help="Disable Jennifer scheduler (music-only). Voice FIFO "
                         "still carries silence so the streamer keeps running.")
+    p.add_argument("--no-music", action="store_true",
+                   help="Voice-content QA mode: music FIFO pumps silence, "
+                        "so the only audio is voice + ambient rain. Pair "
+                        "with --test-intros-interval to audition intros/"
+                        "outros without waiting for natural transitions.")
     p.add_argument("--test-intros-interval", type=float, default=None,
                    help="Dev mode: fire synthetic track-change transitions "
                         "every N seconds, bypassing MusicFeeder timing. Use "
@@ -250,6 +258,7 @@ def main() -> None:
         duration=args.duration,
         voice_test_tone=args.voice_test_tone,
         no_jennifer=args.no_jennifer,
+        no_music=args.no_music,
         test_intros_interval=args.test_intros_interval,
     ))
 

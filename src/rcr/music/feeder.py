@@ -60,6 +60,7 @@ class MusicFeeder:
         *,
         rng: random.Random | None = None,
         on_track_change: TrackChangeCallback | None = None,
+        silent_mode: bool = False,
     ):
         self.music_dir = music_dir
         self.fifo_path = fifo_path
@@ -71,6 +72,12 @@ class MusicFeeder:
         self._last: Track | None = None
         self._stop = False
         self._on_track_change = on_track_change
+        # Voice-content QA mode: pump silence on the music FIFO so the
+        # stream's audio is ambient rain + Jennifer only, no songs. The
+        # streamer's filter graph stays unchanged; sidechain just never has
+        # music to duck. No track-change events fire (silence has no
+        # transitions).
+        self._silent_mode = silent_mode
 
     def stop(self) -> None:
         self._stop = True
@@ -84,6 +91,11 @@ class MusicFeeder:
         log.info("opening %s for write (blocks until ffmpeg attaches)…", self.fifo_path)
         with open(self.fifo_path, "wb") as fifo:
             log.info("FIFO open; starting playback")
+            if self._silent_mode:
+                log.info("music feeder: silent-mode QA path (no songs will play)")
+                while not self._stop:
+                    self._emit_silence(fifo, NO_LIBRARY_SLEEP_S)
+                return
             while not self._stop:
                 track = self._next_track()
                 if track is None:
