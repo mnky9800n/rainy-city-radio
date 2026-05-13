@@ -43,6 +43,7 @@ DEFAULT_AMBIENT = Path("assets/ambient_rain.mp3")
 DEFAULT_MUSIC_DIR = Path("music")
 DEFAULT_SPOTS_DIR = Path("jennifer/spots")
 DEFAULT_INTROS_DIR = Path("jennifer/track_intros")
+DEFAULT_COMMERCIALS_DIR = Path("jennifer/commercials")
 DEFAULT_DRY_RUN_OUT = Path("out/live_test.flv")
 
 # Test-tone parameters used only with --voice-test-tone (dry-run verification
@@ -67,6 +68,7 @@ async def run(
     music_dir: Path,
     spots_dir: Path,
     intros_dir: Path,
+    commercials_dir: Path,
     music_fifo: Path,
     voice_fifo: Path,
     output_target: str,
@@ -91,6 +93,7 @@ async def run(
         None if no_jennifer
         else JenniferScheduler(
             voice_feeder, spots_dir=spots_dir, intros_dir=intros_dir,
+            commercials_dir=commercials_dir,
             test_intros_interval_s=test_intros_interval,
             test_intros_music_dir=music_dir if test_intros_interval else None,
         )
@@ -205,6 +208,7 @@ def main() -> None:
     p.add_argument("--music-dir", type=Path, default=DEFAULT_MUSIC_DIR)
     p.add_argument("--spots-dir", type=Path, default=DEFAULT_SPOTS_DIR)
     p.add_argument("--intros-dir", type=Path, default=DEFAULT_INTROS_DIR)
+    p.add_argument("--commercials-dir", type=Path, default=DEFAULT_COMMERCIALS_DIR)
     p.add_argument("--music-fifo", type=Path, default=DEFAULT_MUSIC_FIFO)
     p.add_argument("--voice-fifo", type=Path, default=DEFAULT_VOICE_FIFO)
     p.add_argument("--no-jennifer", action="store_true",
@@ -254,6 +258,7 @@ def main() -> None:
         music_dir=args.music_dir,
         spots_dir=args.spots_dir,
         intros_dir=args.intros_dir,
+        commercials_dir=args.commercials_dir,
         music_fifo=args.music_fifo,
         voice_fifo=args.voice_fifo,
         output_target=target,

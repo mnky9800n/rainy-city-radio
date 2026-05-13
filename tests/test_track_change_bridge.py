@@ -185,6 +185,74 @@ async def test_plan_transition_includes_outro_when_prev_present(tmp_path):
 # Bridge: timeout fallback
 # ---------------------------------------------------------------------------
 
+async def test_plan_transition_inline_when_talk_break_disabled(tmp_path):
+    """talk_break_every_n=0 means never fire talk-breaks; inline only."""
+    intros_dir = fake_bake_intros(tmp_path, "Test - Foo", ["intro_simple"])
+    s = make_scheduler(tmp_path, intros_dir, intro_chance=1.0, outro_chance=0.0)
+    s.talk_break_every_n = 0
+    s._loop = asyncio.get_running_loop()
+    fake = FakePlayer()
+    s.player = fake  # type: ignore[assignment]
+    track = make_track("Test - Foo")
+    # Even after many transitions the planner should never go talk-break.
+    for _ in range(10):
+        pause_s = await asyncio.to_thread(s.plan_transition, None, track)
+        assert pause_s == 0.0
+    await asyncio.sleep(0.05)
+
+
+async def test_plan_transition_fires_talk_break_every_n_when_commercial_baked(tmp_path):
+    """When talk_break_every_n=2 and a commercial is baked, the 2nd transition
+    fires a talk-break (non-zero pause) and resets the counter."""
+    import shutil
+    from rcr.jennifer.commercials import COMMERCIALS
+    # Use a real baked spot from disk as a stand-in commercial mp3 — we just
+    # need an actual mp3 ffprobe can read.
+    src_pool = list(Path("jennifer/spots").glob("*.mp3")) if Path("jennifer/spots").exists() else []
+    if not src_pool or not COMMERCIALS:
+        pytest.skip("no baked spots or no COMMERCIALS catalog to test against")
+    commercials_dir = tmp_path / "commercials"
+    commercials_dir.mkdir()
+    # Stamp the catalog's first commercial id on a real mp3.
+    test_id = COMMERCIALS[0].id
+    shutil.copyfile(src_pool[0], commercials_dir / f"{test_id}.mp3")
+
+    intros_dir = fake_bake_intros(tmp_path, "Test - Foo", ["intro_simple"])
+    s = make_scheduler(tmp_path, intros_dir, intro_chance=1.0, outro_chance=0.0)
+    s.commercials_dir = commercials_dir
+    s.talk_break_every_n = 2
+    s._loop = asyncio.get_running_loop()
+    fake = FakePlayer()
+    s.player = fake  # type: ignore[assignment]
+    track = make_track("Test - Foo")
+
+    # First transition: not yet at the threshold → inline mode, pause=0.
+    pause1 = await asyncio.to_thread(s.plan_transition, None, track)
+    assert pause1 == 0.0
+    # Second transition: hits threshold + commercial baked → talk-break.
+    pause2 = await asyncio.to_thread(s.plan_transition, track, track)
+    assert pause2 > 0.0, "talk-break should return positive duration"
+    # Counter must reset; third transition is inline again.
+    pause3 = await asyncio.to_thread(s.plan_transition, track, track)
+    assert pause3 == 0.0
+
+
+async def test_plan_transition_falls_back_to_inline_when_no_commercial_baked(tmp_path):
+    """talk_break_every_n triggers but commercials_dir is empty → inline mode."""
+    intros_dir = fake_bake_intros(tmp_path, "Test - Foo", ["intro_simple"])
+    s = make_scheduler(tmp_path, intros_dir, intro_chance=1.0, outro_chance=0.0)
+    s.commercials_dir = tmp_path / "no_commercials"  # doesn't exist
+    s.talk_break_every_n = 1  # every transition is a talk-break opportunity
+    s._loop = asyncio.get_running_loop()
+    fake = FakePlayer()
+    s.player = fake  # type: ignore[assignment]
+    track = make_track("Test - Foo")
+    # Should always return 0 (inline fallback), since nothing is baked.
+    for _ in range(5):
+        pause_s = await asyncio.to_thread(s.plan_transition, None, track)
+        assert pause_s == 0.0
+
+
 async def test_plan_transition_times_out_gracefully(tmp_path, monkeypatch):
     """If the async planner hangs longer than the configured timeout, the
     sync bridge bails and returns 0 instead of blocking the feeder thread."""

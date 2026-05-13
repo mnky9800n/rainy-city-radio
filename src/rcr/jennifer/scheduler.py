@@ -40,8 +40,10 @@ import concurrent.futures
 import datetime as _dt
 import logging
 import random
+import subprocess
 from pathlib import Path
 
+from rcr.jennifer.commercials import COMMERCIALS, Commercial
 from rcr.jennifer.feeder import VoiceFeeder
 from rcr.jennifer.player import JenniferPlayer
 from rcr.jennifer.spots import SPOTS, Category, Spot, category_for_hour
@@ -51,6 +53,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SPOTS_DIR = Path("jennifer/spots")
 DEFAULT_INTROS_DIR = Path("jennifer/track_intros")
+DEFAULT_COMMERCIALS_DIR = Path("jennifer/commercials")
 
 # Mean seconds between spots, with ±JITTER_S uniform noise. A real DJ would
 # vary this further (denser when there's chat, sparser late night) but for
@@ -62,6 +65,12 @@ JITTER_S = 180.0          # ±3 min
 # same transition (~20% of changes get both an outro and an intro).
 DEFAULT_INTRO_CHANCE = 0.65
 DEFAULT_OUTRO_CHANCE = 0.30
+
+# How often (in track changes) the scheduler fires a talk-break instead of
+# inline intros. 0 disables talk-breaks entirely. ~4 means a commercial
+# segment every 4 tracks ≈ every 12-15 minutes given track lengths.
+# When triggered, the music FIFO pauses for the duration of the commercial.
+DEFAULT_TALK_BREAK_EVERY_N = 4
 
 # Sync wait on the planner coroutine from the music-feeder thread. Inline-
 # intro planning is sub-millisecond (filesystem stat + task create); M4.5
@@ -144,6 +153,52 @@ def pick_baked_intro_or_outro(
     return rng.choice(candidates) if candidates else None
 
 
+def select_baked_commercial(
+    commercials_dir: Path,
+    rng: random.Random,
+) -> tuple[Commercial, Path] | None:
+    """Pick a random commercial whose voice mp3 is baked on disk.
+
+    Returns (commercial, mp3_path) or None if nothing is baked yet.
+    Pure-ish: filesystem read + rng; no time / feeder dependency. The
+    scheduler uses this on talk-break opportunities; if it returns None
+    we fall back to inline-intro mode.
+    """
+    if not commercials_dir.exists():
+        return None
+    available: list[tuple[Commercial, Path]] = []
+    for c in COMMERCIALS:
+        path = commercials_dir / f"{c.id}.mp3"
+        if path.exists() and path.stat().st_size > 0:
+            available.append((c, path))
+    return rng.choice(available) if available else None
+
+
+def probe_mp3_duration_s(path: Path) -> float:
+    """Return the duration of an mp3 in seconds, via ffprobe.
+
+    Used by the talk-break planner to know how long the music FIFO needs
+    to pause. ffprobe is part of the ffmpeg toolchain we already depend on,
+    so this is essentially free (no new dependency).
+    """
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffprobe failed for {path}: rc={proc.returncode} "
+            f"stderr={proc.stderr.strip()!r}"
+        )
+    return float(proc.stdout.strip())
+
+
 def select_transition_segments(
     prev: Track | None,
     current: Track,
@@ -177,6 +232,7 @@ class JenniferScheduler:
         voice_feeder: VoiceFeeder,
         spots_dir: Path = DEFAULT_SPOTS_DIR,
         intros_dir: Path = DEFAULT_INTROS_DIR,
+        commercials_dir: Path = DEFAULT_COMMERCIALS_DIR,
         *,
         rng: random.Random | None = None,
         mean_interval_s: float = MEAN_INTERVAL_S,
@@ -184,6 +240,7 @@ class JenniferScheduler:
         first_delay_s: float | None = None,
         intro_chance: float = DEFAULT_INTRO_CHANCE,
         outro_chance: float = DEFAULT_OUTRO_CHANCE,
+        talk_break_every_n: int = DEFAULT_TALK_BREAK_EVERY_N,
         # Dev-only: fire synthetic transitions on a timer instead of waiting
         # for real track changes. When set, the orchestrator should also stop
         # wiring MusicFeeder.transition_planner so the test loop is the sole
@@ -195,6 +252,7 @@ class JenniferScheduler:
         self.player = JenniferPlayer(voice_feeder)
         self.spots_dir = spots_dir
         self.intros_dir = intros_dir
+        self.commercials_dir = commercials_dir
         self.rng = rng or random.Random()
         self.mean_interval_s = mean_interval_s
         self.jitter_s = jitter_s
@@ -202,6 +260,8 @@ class JenniferScheduler:
         self.first_delay_s = first_delay_s if first_delay_s is not None else 30.0
         self.intro_chance = intro_chance
         self.outro_chance = outro_chance
+        self.talk_break_every_n = talk_break_every_n
+        self._tracks_since_talk_break = 0
         self.test_intros_interval_s = test_intros_interval_s
         self.test_intros_music_dir = test_intros_music_dir
         self._stop = asyncio.Event()
@@ -307,11 +367,34 @@ class JenniferScheduler:
     ) -> float:
         """Coroutine half of `plan_transition`. Runs on the asyncio loop.
 
-        Decides voiced segments, enqueues them on the player, and returns
-        the pause duration the music FIFO should observe. Today that's
-        always 0 (M3.5 inline mode); M4.5 will branch on a per-transition
-        decision and return a non-zero duration for talk-breaks.
+        Two modes:
+
+        1. **Talk-break (M4.5):** every `talk_break_every_n` transitions,
+           pick a baked commercial, return its duration so the music
+           FIFO pauses entirely while the commercial plays alone over
+           the rain bed.
+        2. **Inline intro (M3.5 default):** otherwise pick outro/intro
+           segments and fire them fire-and-forget; music keeps playing
+           under the ducked voice. Returns 0 (no pause).
+
+        Talk-break falls back to inline mode if no commercials are baked
+        yet — the wiring is forward-compatible with an empty commercial
+        catalog (which is the current state on most hosts).
         """
+        self._tracks_since_talk_break += 1
+        if (self.talk_break_every_n > 0
+                and self._tracks_since_talk_break >= self.talk_break_every_n):
+            pick = select_baked_commercial(self.commercials_dir, self.rng)
+            if pick is not None:
+                self._tracks_since_talk_break = 0
+                return await self._fire_talk_break(*pick)
+            log.debug(
+                "talk-break opportunity (%d since last) but no baked "
+                "commercials in %s — falling back to inline mode",
+                self._tracks_since_talk_break, self.commercials_dir,
+            )
+
+        # Inline-intro mode.
         segments = select_transition_segments(
             prev, current, self.intros_dir, self.rng,
             self.intro_chance, self.outro_chance,
@@ -330,6 +413,31 @@ class JenniferScheduler:
             name=f"jennifer_transition:{current.name}",
         )
         return 0.0
+
+    async def _fire_talk_break(
+        self, commercial: Commercial, mp3_path: Path,
+    ) -> float:
+        """Kick off commercial playback and return its duration.
+
+        The duration is what `MusicFeeder` uses to know how long to write
+        silence on the music FIFO. The commercial plays alone (well, with
+        the rain bed) during that window — no ducking-under-music since
+        there's no music to duck.
+        """
+        try:
+            duration_s = await asyncio.to_thread(probe_mp3_duration_s, mp3_path)
+        except Exception:
+            log.exception("ffprobe failed for %s; aborting talk-break", mp3_path)
+            return 0.0
+        log.info(
+            "talk-break: %s (%s, %.1fs) — pausing music FIFO",
+            commercial.id, commercial.character, duration_s,
+        )
+        asyncio.create_task(
+            self.player.play_mp3(mp3_path),
+            name=f"jennifer_talk_break:{commercial.id}",
+        )
+        return duration_s
 
     async def _play_transition(self, prev: Track | None, current: Track) -> None:
         """Pick + play the outro/intro segments for a track change."""
