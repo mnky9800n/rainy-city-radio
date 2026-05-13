@@ -15,8 +15,13 @@ Two parallel mechanisms drive Jennifer's airtime:
    transitions get both.
 
    The bridge from `MusicFeeder` (which runs on a blocking IO thread)
-   into asyncio happens via `track_change_callback`, which uses
-   `loop.call_soon_threadsafe`. The loop reference is captured in `run()`.
+   into asyncio happens via `plan_transition`, a sync method that hands
+   off to `_plan_transition_async` via `run_coroutine_threadsafe` and
+   blocks the feeder thread until a pause-duration is returned. The loop
+   reference is captured in `run()`. M3.5 inline mode always returns 0
+   (music plays under voice with ducking); M4.5 talk-break mode will
+   return a positive duration so the music FIFO yields entirely while
+   the voiced segment plays.
 
 Deferred:
     - Chat-reactive replies — M4.
@@ -31,6 +36,7 @@ time and the voice feeder. Track-intro picking is similarly factored into
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import datetime as _dt
 import logging
 import random
@@ -56,6 +62,13 @@ JITTER_S = 180.0          # ±3 min
 # same transition (~20% of changes get both an outro and an intro).
 DEFAULT_INTRO_CHANCE = 0.65
 DEFAULT_OUTRO_CHANCE = 0.30
+
+# Sync wait on the planner coroutine from the music-feeder thread. Inline-
+# intro planning is sub-millisecond (filesystem stat + task create); M4.5
+# talk-break planning may pre-decode mp3s and take a few hundred ms. 30s is
+# generous headroom — exceeding it means asyncio is hung and we should fall
+# back to a no-pause transition rather than blocking the music feeder.
+TRANSITION_PLAN_TIMEOUT_S = 30.0
 
 # Probability of picking each category at any given tick. Anything that isn't
 # the time-of-day lore is "always available"; the lore weight only applies
@@ -173,7 +186,7 @@ class JenniferScheduler:
         outro_chance: float = DEFAULT_OUTRO_CHANCE,
         # Dev-only: fire synthetic transitions on a timer instead of waiting
         # for real track changes. When set, the orchestrator should also stop
-        # wiring MusicFeeder.on_track_change so the test loop is the sole
+        # wiring MusicFeeder.transition_planner so the test loop is the sole
         # source of transitions (otherwise voice queue gets crowded).
         test_intros_interval_s: float | None = None,
         test_intros_music_dir: Path | None = None,
@@ -259,28 +272,64 @@ class JenniferScheduler:
                 log.exception("test transition failed")
             prev = current
 
-    def track_change_callback(self, prev: Track | None, current: Track) -> None:
-        """Thread-safe entry point for `MusicFeeder.on_track_change`.
+    def plan_transition(self, prev: Track | None, current: Track) -> float:
+        """Sync entry point for `MusicFeeder.transition_planner`.
 
         Called from the music-feeder thread *before* the new track starts
-        flowing. We hop back onto the asyncio loop and schedule the
-        intro/outro playback there so all voice-feeder access stays on the
-        async side.
-        """
-        if self._loop is None:
-            # Scheduler hasn't entered run() yet — drop the event silently.
-            # First-track events that race startup aren't worth crashing for.
-            return
-        if self._stop.is_set():
-            return
-        self._loop.call_soon_threadsafe(self._handle_track_change, prev, current)
+        flowing. Returns the number of seconds the music FIFO should pause
+        (write silence) before playing `current`. M3.5 inline-intro mode
+        returns 0.0 and side-effect-enqueues the voice segments onto the
+        player; M4.5 talk-break mode will compute total voiced-segment
+        duration and return it.
 
-    def _handle_track_change(self, prev: Track | None, current: Track) -> None:
-        # Runs on the asyncio loop. Fire-and-forget the transition task.
+        Bridges to the asyncio loop via `run_coroutine_threadsafe`; the
+        feeder thread blocks until the planner coroutine completes or the
+        configured timeout fires.
+        """
+        if self._loop is None or self._stop.is_set():
+            # Scheduler hasn't entered run() yet (or has been stopped) —
+            # quietly return "no pause." First-track events that race
+            # startup aren't worth crashing for.
+            return 0.0
+        coro = self._plan_transition_async(prev, current)
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return fut.result(timeout=TRANSITION_PLAN_TIMEOUT_S)
+        except concurrent.futures.TimeoutError:
+            log.warning("transition planner timed out; falling back to no pause")
+            return 0.0
+        except Exception:
+            log.exception("transition planner crashed; falling back to no pause")
+            return 0.0
+
+    async def _plan_transition_async(
+        self, prev: Track | None, current: Track,
+    ) -> float:
+        """Coroutine half of `plan_transition`. Runs on the asyncio loop.
+
+        Decides voiced segments, enqueues them on the player, and returns
+        the pause duration the music FIFO should observe. Today that's
+        always 0 (M3.5 inline mode); M4.5 will branch on a per-transition
+        decision and return a non-zero duration for talk-breaks.
+        """
+        segments = select_transition_segments(
+            prev, current, self.intros_dir, self.rng,
+            self.intro_chance, self.outro_chance,
+        )
+        if not segments:
+            log.debug("transition %s→%s: silent (no rolled/baked segments)",
+                      prev.name if prev else "(none)", current.name)
+            return 0.0
+        log.info("transition: %s", " → ".join(p.name for p in segments))
+        # Fire-and-forget: segments queue on the voice feeder and play
+        # back-to-back, paced naturally by the pipe-buffer backpressure.
+        # The music feeder doesn't wait for them — inline mode means they
+        # overlap with the start of `current` under the sidechain ducker.
         asyncio.create_task(
-            self._play_transition(prev, current),
+            self.player.play_sequence(segments),
             name=f"jennifer_transition:{current.name}",
         )
+        return 0.0
 
     async def _play_transition(self, prev: Track | None, current: Track) -> None:
         """Pick + play the outro/intro segments for a track change."""

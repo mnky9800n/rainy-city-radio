@@ -95,18 +95,20 @@ async def run(
             test_intros_music_dir=music_dir if test_intros_interval else None,
         )
     )
-    # MusicFeeder takes the scheduler's callback so it can fire on track
-    # changes. In test-intros mode the synthetic-transition loop is the
-    # sole source, so we skip wiring the real callback. With --no-jennifer
-    # there's no scheduler at all. With --no-music the feeder pumps silence
-    # (no transitions either).
+    # MusicFeeder consults the scheduler's transition planner on every
+    # track change. Planner returns seconds to pause music for talk-breaks
+    # (M4.5); inline intros (M3.5 today) return 0 and queue voice via
+    # ducking instead. In test-intros mode the synthetic-transition loop
+    # is the sole source, so we skip wiring the planner. With --no-jennifer
+    # there's no scheduler. With --no-music the feeder pumps silence and
+    # transitions don't fire.
     if jennifer is None or test_intros_interval is not None or no_music:
-        track_change_cb = None
+        transition_planner = None
     else:
-        track_change_cb = jennifer.track_change_callback
+        transition_planner = jennifer.plan_transition
     music_feeder = MusicFeeder(
         music_dir, music_fifo,
-        on_track_change=track_change_cb, silent_mode=no_music,
+        transition_planner=transition_planner, silent_mode=no_music,
     )
 
     music_task = asyncio.create_task(asyncio.to_thread(music_feeder.run), name="music_feeder")

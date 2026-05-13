@@ -32,13 +32,19 @@ from rcr.audio_format import CHANNELS, SAMPLE_RATE, silence_bytes
 from rcr.music.selector import ArcState, recent_n, select
 from rcr.music.tracks import Track, load_library
 
-# Callback fired from the music-feeder thread *before* a new track's PCM
-# starts flowing into the FIFO. Receives (previous_track, new_track). The
-# previous is None for the very first track of a run. Implementations must
-# be quick + thread-safe — the feeder is on a blocking IO loop and the
-# event is delivered synchronously. Use loop.call_soon_threadsafe to bridge
-# back to asyncio.
-TrackChangeCallback = Callable[["Track | None", "Track"], None]
+# Called from the music-feeder thread *before* a new track's PCM starts
+# flowing into the FIFO. Receives (previous_track, new_track) and must
+# return the number of seconds the feeder should pause (write silence on
+# the music FIFO) before starting `new_track`. Side-effect-only planners
+# can return 0.0 (M3.5 inline intros: voice queues in parallel, plays under
+# ducked music, no pause). Non-zero return is the M4.5 talk-break mode:
+# main playlist yields entirely for the voiced segment.
+#
+# Implementations are synchronous from the feeder's perspective but
+# typically bridge into asyncio via `run_coroutine_threadsafe`. They must
+# return within `TRANSITION_PLAN_TIMEOUT_S` or the feeder treats them as
+# crashed and continues with no pause.
+TransitionPlanner = Callable[["Track | None", "Track"], float]
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +64,7 @@ class MusicFeeder:
         fifo_path: Path,
         *,
         rng: random.Random | None = None,
-        on_track_change: TrackChangeCallback | None = None,
+        transition_planner: TransitionPlanner | None = None,
         silent_mode: bool = False,
     ):
         self.music_dir = music_dir
@@ -70,11 +76,11 @@ class MusicFeeder:
         self._ring: deque[Path] = deque(maxlen=10)
         self._last: Track | None = None
         self._stop = False
-        self._on_track_change = on_track_change
+        self._transition_planner = transition_planner
         # Voice-content QA mode: pump silence on the music FIFO so the
         # stream's audio is ambient rain + Jennifer only, no songs. The
         # streamer's filter graph stays unchanged; sidechain just never has
-        # music to duck. No track-change events fire (silence has no
+        # music to duck. No transition planning runs (silence has no
         # transitions).
         self._silent_mode = silent_mode
 
@@ -101,19 +107,27 @@ class MusicFeeder:
                     self._emit_silence(fifo, NO_LIBRARY_SLEEP_S)
                     continue
                 self._ring.append(track.path)
-                # Fire the change event *before* playback begins — gives the
-                # Jennifer scheduler a window to pick an outro for `_last`
-                # and an intro for `track`, then enqueue them onto the voice
-                # FIFO. The first few seconds of `track` will play under
-                # Jennifer's voice via the existing sidechain ducking.
-                if self._on_track_change is not None:
-                    try:
-                        self._on_track_change(self._last, track)
-                    except Exception:
-                        # Don't let a buggy callback stall playback.
-                        log.exception("on_track_change callback raised")
+                # Ask the scheduler what to do with this transition. M3.5
+                # inline-intro mode: returns 0 immediately and queues voice
+                # content fire-and-forget; we play through. M4.5 talk-break
+                # mode: returns a pause duration and we silence the music
+                # FIFO for that long while the voiced segment plays alone.
+                pause_s = self._plan_transition(self._last, track)
+                if pause_s > 0:
+                    log.info("transition pause: %.1fs silence on music FIFO", pause_s)
+                    self._emit_silence(fifo, pause_s)
                 self._play_track(track, fifo)
                 self._last = track
+
+    def _plan_transition(self, prev: Track | None, current: Track) -> float:
+        """Invoke the configured transition planner. Returns 0 on any failure."""
+        if self._transition_planner is None:
+            return 0.0
+        try:
+            return float(self._transition_planner(prev, current))
+        except Exception:
+            log.exception("transition planner raised; no pause")
+            return 0.0
 
     def _next_track(self) -> Track | None:
         library = load_library(self.music_dir)
