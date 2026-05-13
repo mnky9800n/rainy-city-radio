@@ -116,8 +116,16 @@ class MusicFeeder:
                 if pause_s > 0:
                     log.info("transition pause: %.1fs silence on music FIFO", pause_s)
                     self._emit_silence(fifo, pause_s)
-                self._play_track(track, fifo)
-                self._last = track
+                played_clean = self._play_track(track, fifo)
+                if played_clean:
+                    self._last = track
+                else:
+                    # Don't anchor BPM/energy continuity on a track that
+                    # crashed mid-play — `_last` is the selector's seed for
+                    # the next pick, and a broken track has unreliable
+                    # tempo/energy data once playback aborts.
+                    log.info("not anchoring _last on incomplete track %s",
+                             track.name)
 
     def _plan_transition(self, prev: Track | None, current: Track) -> float:
         """Invoke the configured transition planner. Returns 0 on any failure."""
@@ -155,10 +163,18 @@ class MusicFeeder:
                 self._stop = True
                 return
 
-    def _play_track(self, track: Track, fifo) -> None:
+    def _play_track(self, track: Track, fifo) -> bool:
+        """Stream `track` through the per-track decoder onto the music FIFO.
+
+        Returns True if playback completed cleanly (decoder hit EOF, FIFO
+        accepted every chunk). Returns False if the decoder errored, the
+        track aborted mid-play, or shutdown intervened. The caller uses the
+        return value to decide whether to update `_last` for BPM/energy
+        continuity — a broken track shouldn't anchor the next pick.
+        """
         log.info("now playing: %s [%s] bpm=%.0f energy=%d mood=%s",
-                 track.name, track.fictional_artist, track.bpm, track.energy,
-                 ",".join(track.mood))
+                 track.name, track.display_artist or "?",
+                 track.bpm, track.energy, ",".join(track.mood))
         proc = subprocess.Popen(
             [
                 "ffmpeg",
@@ -175,10 +191,15 @@ class MusicFeeder:
             stderr=subprocess.PIPE,
         )
         assert proc.stdout is not None
+        played_clean = False
         try:
             while not self._stop:
                 chunk = proc.stdout.read(PCM_CHUNK)
                 if not chunk:
+                    # Decoder hit EOF on its stdout — track played to end.
+                    # Whether the subprocess itself exited cleanly is
+                    # confirmed in the finally block via returncode.
+                    played_clean = True
                     break
                 fifo.write(chunk)
                 fifo.flush()
@@ -193,7 +214,20 @@ class MusicFeeder:
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
-            stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-            if proc.returncode and proc.returncode != 0 and stderr:
-                log.warning("decoder for %s exited rc=%s: %s",
-                            track.name, proc.returncode, stderr.strip())
+            stderr = (
+                proc.stderr.read().decode(errors="replace").strip()
+                if proc.stderr else ""
+            )
+            rc = proc.returncode or 0
+            if rc != 0:
+                # Log every non-zero exit — even if stderr is empty, that
+                # itself is information (silent failure). Demote the
+                # played_clean optimism set by EOF if the subprocess
+                # didn't actually exit cleanly.
+                log.warning(
+                    "decoder for %s exited rc=%s%s",
+                    track.name, rc,
+                    f": {stderr}" if stderr else " (no stderr captured)",
+                )
+                played_clean = False
+        return played_clean
