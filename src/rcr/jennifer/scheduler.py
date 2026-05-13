@@ -201,8 +201,11 @@ class JenniferScheduler:
         log.info("jennifer scheduler starting; spots_dir=%s intros_dir=%s",
                  self.spots_dir, self.intros_dir)
         # Capture the loop reference so the music-feeder thread can bridge
-        # track-change events back into asyncio via call_soon_threadsafe.
+        # track-change events back into asyncio via call_soon_threadsafe;
+        # also hand it to the voice feeder so its blocking-write thread can
+        # signal playback-ack futures back to the player.
         self._loop = asyncio.get_running_loop()
+        self.voice_feeder.set_event_loop(self._loop)
 
         # Dev-only: kick off the synthetic-transition test loop alongside
         # the periodic-spot loop. They share the voice queue, which is fine.
