@@ -22,6 +22,7 @@ music/*.mp3
 music/*.json
 jennifer/voices/
 jennifer/spots/
+jennifer/track_intros/
 
 # Local stream output during M0/M1 smoke testing
 out/
@@ -29,3 +30,6 @@ out/
 
 # Local secrets
 .env
+
+# Cron bake output (lives in $HOME but harmless to also ignore here)
+rcr-bake.log

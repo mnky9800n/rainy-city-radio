@@ -39,7 +39,7 @@ from pathlib import Path
 from rcr.jennifer.feeder import VoiceFeeder
 from rcr.jennifer.spot_player import play_mp3
 from rcr.jennifer.spots import SPOTS, Category, Spot, category_for_hour
-from rcr.music.tracks import Track
+from rcr.music.tracks import Track, load_library
 
 log = logging.getLogger(__name__)
 
@@ -144,6 +144,12 @@ class JenniferScheduler:
         first_delay_s: float | None = None,
         intro_chance: float = DEFAULT_INTRO_CHANCE,
         outro_chance: float = DEFAULT_OUTRO_CHANCE,
+        # Dev-only: fire synthetic transitions on a timer instead of waiting
+        # for real track changes. When set, the orchestrator should also stop
+        # wiring MusicFeeder.on_track_change so the test loop is the sole
+        # source of transitions (otherwise voice queue gets crowded).
+        test_intros_interval_s: float | None = None,
+        test_intros_music_dir: Path | None = None,
     ):
         self.voice_feeder = voice_feeder
         self.spots_dir = spots_dir
@@ -155,6 +161,8 @@ class JenniferScheduler:
         self.first_delay_s = first_delay_s if first_delay_s is not None else 30.0
         self.intro_chance = intro_chance
         self.outro_chance = outro_chance
+        self.test_intros_interval_s = test_intros_interval_s
+        self.test_intros_music_dir = test_intros_music_dir
         self._stop = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -167,6 +175,18 @@ class JenniferScheduler:
         # Capture the loop reference so the music-feeder thread can bridge
         # track-change events back into asyncio via call_soon_threadsafe.
         self._loop = asyncio.get_running_loop()
+
+        # Dev-only: kick off the synthetic-transition test loop alongside
+        # the periodic-spot loop. They share the voice queue, which is fine.
+        if (self.test_intros_interval_s is not None
+                and self.test_intros_music_dir is not None):
+            asyncio.create_task(
+                self._test_intros_loop(
+                    self.test_intros_interval_s, self.test_intros_music_dir,
+                ),
+                name="jennifer_test_intros",
+            )
+
         # Initial delay before the very first spot.
         if await self._sleep_or_stop(self.first_delay_s):
             return
@@ -176,6 +196,37 @@ class JenniferScheduler:
             log.debug("next spot in %.0fs", interval)
             if await self._sleep_or_stop(interval):
                 return
+
+    async def _test_intros_loop(self, interval_s: float, music_dir: Path) -> None:
+        """Dev mode: fire synthetic prev→current transitions every interval_s.
+
+        Bypasses MusicFeeder entirely. Useful for verifying intro/outro bake
+        coverage and ducking behavior without waiting for natural 3-5min
+        track transitions. The orchestrator should NOT also wire the music
+        feeder's track-change callback in this mode (otherwise both sources
+        emit transitions and the voice queue gets crowded).
+        """
+        library = load_library(music_dir)
+        if not library:
+            log.warning("test intros: no tagged tracks in %s; loop won't fire",
+                        music_dir)
+            return
+        log.info(
+            "test intros: firing synthetic transitions every %.0fs across "
+            "%d tracks", interval_s, len(library),
+        )
+        prev: Track | None = None
+        while not self._stop.is_set():
+            if await self._sleep_or_stop(interval_s):
+                return
+            current = self.rng.choice(library)
+            log.info("test transition: %s → %s",
+                     prev.name if prev else "(none)", current.name)
+            try:
+                await self._play_transition(prev, current)
+            except Exception:
+                log.exception("test transition failed")
+            prev = current
 
     def track_change_callback(self, prev: Track | None, current: Track) -> None:
         """Thread-safe entry point for `MusicFeeder.on_track_change`.

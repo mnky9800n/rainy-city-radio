@@ -73,6 +73,7 @@ async def run(
     duration: float | None,
     voice_test_tone: bool,
     no_jennifer: bool,
+    test_intros_interval: float | None,
 ) -> None:
     ensure_fifo(music_fifo)
     ensure_fifo(voice_fifo)
@@ -89,14 +90,20 @@ async def run(
         None if no_jennifer
         else JenniferScheduler(
             voice_feeder, spots_dir=spots_dir, intros_dir=intros_dir,
+            test_intros_interval_s=test_intros_interval,
+            test_intros_music_dir=music_dir if test_intros_interval else None,
         )
     )
     # MusicFeeder takes the scheduler's callback so it can fire on track
-    # changes. With --no-jennifer the callback is None and the feeder runs
-    # the same way it did before track intros existed.
+    # changes. In test-intros mode the synthetic-transition loop is the
+    # sole source, so we skip wiring the real callback. With --no-jennifer
+    # there's no scheduler at all.
+    if jennifer is None or test_intros_interval is not None:
+        track_change_cb = None
+    else:
+        track_change_cb = jennifer.track_change_callback
     music_feeder = MusicFeeder(
-        music_dir, music_fifo,
-        on_track_change=jennifer.track_change_callback if jennifer else None,
+        music_dir, music_fifo, on_track_change=track_change_cb,
     )
 
     music_task = asyncio.create_task(asyncio.to_thread(music_feeder.run), name="music_feeder")
@@ -198,6 +205,11 @@ def main() -> None:
     p.add_argument("--no-jennifer", action="store_true",
                    help="Disable Jennifer scheduler (music-only). Voice FIFO "
                         "still carries silence so the streamer keeps running.")
+    p.add_argument("--test-intros-interval", type=float, default=None,
+                   help="Dev mode: fire synthetic track-change transitions "
+                        "every N seconds, bypassing MusicFeeder timing. Use "
+                        "to verify intro/outro bake coverage without waiting "
+                        "for real ~3-5min track transitions.")
     p.add_argument("--dry-run", action="store_true",
                    help="Write FLV to out/live_test.flv instead of YouTube RTMP.")
     p.add_argument("--dry-run-out", type=Path, default=DEFAULT_DRY_RUN_OUT)
@@ -238,6 +250,7 @@ def main() -> None:
         duration=args.duration,
         voice_test_tone=args.voice_test_tone,
         no_jennifer=args.no_jennifer,
+        test_intros_interval=args.test_intros_interval,
     ))
 
 
