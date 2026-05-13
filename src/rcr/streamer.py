@@ -31,11 +31,11 @@ import signal
 from dataclasses import dataclass
 from pathlib import Path
 
+from rcr.audio_format import CHANNELS, SAMPLE_RATE
+
 log = logging.getLogger(__name__)
 
 YOUTUBE_RTMP = "rtmp://a.rtmp.youtube.com/live2"
-SAMPLE_RATE = 48000
-CHANNELS = 2
 RESTART_BACKOFF_S = 3.0
 
 

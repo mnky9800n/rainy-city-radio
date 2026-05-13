@@ -18,16 +18,10 @@ import logging
 import subprocess
 from pathlib import Path
 
-from rcr.jennifer.feeder import (
-    BYTES_PER_SAMPLE,
-    CHANNELS,
-    SAMPLE_RATE,
-    VoiceFeeder,
-)
+from rcr.audio_format import BYTES_PER_SECOND, CHANNELS, SAMPLE_RATE
+from rcr.jennifer.feeder import VoiceFeeder
 
 log = logging.getLogger(__name__)
-
-BYTES_PER_SECOND = SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE  # 192_000
 
 # Tiny pad after enqueue so the next scheduled action doesn't crowd the tail
 # of this one — covers the ~100ms of silence-frame latency in the feeder loop.

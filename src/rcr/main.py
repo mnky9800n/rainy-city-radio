@@ -24,12 +24,12 @@ import signal
 import struct
 from pathlib import Path
 
-from rcr.jennifer.feeder import (
+from rcr.audio_format import (
     BYTES_PER_SAMPLE as VOICE_BYTES_PER_SAMPLE,
     CHANNELS as VOICE_CHANNELS,
     SAMPLE_RATE as VOICE_SAMPLE_RATE,
-    VoiceFeeder,
 )
+from rcr.jennifer.feeder import VoiceFeeder
 from rcr.jennifer.scheduler import JenniferScheduler
 from rcr.music.feeder import MusicFeeder
 from rcr.streamer import StreamConfig, Streamer, youtube_target_from_env

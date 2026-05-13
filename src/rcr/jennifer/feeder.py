@@ -19,17 +19,15 @@ import logging
 import queue
 from pathlib import Path
 
-log = logging.getLogger(__name__)
+from rcr.audio_format import silence_bytes
 
-SAMPLE_RATE = 48000
-CHANNELS = 2
-BYTES_PER_SAMPLE = 2  # s16le
+log = logging.getLogger(__name__)
 
 # 100ms silence chunks: small enough that an enqueued speech burst plays
 # within ~one chunk of latency, large enough that the write loop's overhead
 # is invisible. 48000 * 2ch * 2B * 0.1s = 19_200 bytes.
 SILENCE_CHUNK_S = 0.1
-SILENCE_CHUNK = b"\x00" * int(SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE * SILENCE_CHUNK_S)
+SILENCE_CHUNK = silence_bytes(SILENCE_CHUNK_S)
 
 
 class VoiceFeeder:

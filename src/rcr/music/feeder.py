@@ -28,6 +28,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable
 
+from rcr.audio_format import CHANNELS, SAMPLE_RATE, silence_bytes
 from rcr.music.selector import ArcState, recent_n, select
 from rcr.music.tracks import Track, load_library
 
@@ -41,14 +42,12 @@ TrackChangeCallback = Callable[["Track | None", "Track"], None]
 
 log = logging.getLogger(__name__)
 
-SAMPLE_RATE = 48000
-CHANNELS = 2
-BYTES_PER_SAMPLE = 2  # s16le
 PCM_CHUNK = 8192
 
-# Bytes-per-second of PCM at 48k stereo s16le = 192_000
+# Coarse silence chunks (250ms) for the no-library / silent-mode paths.
+# Voice feeder uses smaller chunks for lower speech-injection latency.
 SILENCE_CHUNK_S = 0.25
-SILENCE_CHUNK = b"\x00" * int(SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE * SILENCE_CHUNK_S)
+SILENCE_CHUNK = silence_bytes(SILENCE_CHUNK_S)
 NO_LIBRARY_SLEEP_S = 5.0
 
 
