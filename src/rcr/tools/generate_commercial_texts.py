@@ -358,14 +358,17 @@ def emit_python_module(
         for i, item in enumerate(items, 1):
             total += 1
             cid = f"{spec.name}_{i:03d}"
-            text_repr = item["text"].replace('"""', "'''")
             lines.append("    Commercial(")
             lines.append(f"        id={cid!r},")
             lines.append(f"        category={spec.name!r},")
             lines.append(f"        character={spec.character!r},")
             lines.append(f"        voice_id={spec.voice_id!r},")
             lines.append(f"        bed_mood={item['bed_mood']!r},")
-            lines.append(f'        text="""{text_repr}""",')
+            # repr() is bulletproof against quotes anywhere in the text —
+            # NIM happily emits commercials ending in `."` which the
+            # earlier triple-quoted wrapping couldn't survive. Less pretty
+            # than triple-quotes but unambiguously correct.
+            lines.append(f"        text={item['text']!r},")
             lines.append("    ),")
     lines.append(")")
     lines.append("")

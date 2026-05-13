@@ -166,16 +166,26 @@ def test_emit_produces_importable_module(tmp_path):
     assert psa.character == "Rainy-City Public Safety Bureau"
 
 
-def test_emit_escapes_triple_quotes_in_text(tmp_path):
-    """If NIM ever emits a triple-quoted string inside a commercial text,
-    the generated file must still parse — we replace with single-quotes."""
+def test_emit_handles_tricky_text_with_quotes(tmp_path):
+    """NIM emits all kinds of awkward strings: trailing double-quotes,
+    embedded triple-quotes, single+double mixes. The generated file must
+    parse for ALL of them and the text must round-trip exactly."""
     out = tmp_path / "g.py"
+    awkward_texts = [
+        # Trailing double-quote (the crash this test was added to prevent):
+        'A long enough commercial that ends with a quoted phrase. "Music for the soul."',
+        # Embedded triple-quote:
+        'Long enough text with """embedded triple quotes""" mid-line.',
+        # Mixed quote types:
+        "Long enough text with both 'single' and \"double\" quotes inline.",
+        # Apostrophe + newline:
+        "Long enough text with\nan apostrophe in Marlowe's signoff.",
+    ]
     by_cat = {
-        "A": [
-            {"text": 'Marlowe says: """welcome to the bodega""" — long enough.',
-             "bed_mood": "noir"},
-        ],
+        "A": [{"text": t, "bed_mood": "noir"} for t in awkward_texts],
     }
     emit_python_module(out, by_cat)
-    mod = _import_generated(out, "test_gen_escapes")  # would raise on syntax error
-    assert "'''welcome to the bodega'''" in mod.COMMERCIALS[0].text
+    mod = _import_generated(out, "test_gen_awkward")  # SyntaxError = test fails
+    assert len(mod.COMMERCIALS) == len(awkward_texts)
+    for original, c in zip(awkward_texts, mod.COMMERCIALS):
+        assert c.text == original, f"text round-trip mismatch: {c.text!r} != {original!r}"

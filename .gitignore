@@ -24,6 +24,10 @@ jennifer/voices/
 jennifer/spots/
 jennifer/track_intros/
 
+# NIM-generated draft commercials (overwritten on every bake-tool run;
+# curated keepers live in a separate hand-edited commercials.py).
+src/rcr/jennifer/commercials_generated.py
+
 # Local stream output during M0/M1 smoke testing
 out/
 *.flv
