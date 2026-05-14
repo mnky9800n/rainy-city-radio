@@ -128,7 +128,11 @@ def mix_voice_and_bed(voice_mp3: Path, bed_mp3: Path, out_mp3: Path) -> None:
     to skip-and-log or abort the batch.
     """
     out_mp3.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out_mp3.with_suffix(out_mp3.suffix + ".part")
+    # Temp uses .mp3 extension (ffmpeg infers format from extension); ".part"
+    # alone confuses muxer selection. We could pass `-f mp3` explicitly, but
+    # a `.part.mp3` suffix is just as good and matches the atomic-rename
+    # convention from voicer.py / download_cc.py.
+    tmp = out_mp3.with_suffix(".part.mp3")
     filter_complex = (
         f"[1:a]volume={BED_VOLUME_DB}dB[bed_quiet];"
         f"[0:a][bed_quiet]amix=inputs=2:duration=first:dropout_transition=0[mix]"
@@ -145,6 +149,7 @@ def mix_voice_and_bed(voice_mp3: Path, bed_mp3: Path, out_mp3: Path) -> None:
         "-map", "[mix]",
         "-c:a", "libmp3lame",
         "-b:a", "128k",
+        "-f", "mp3",
         str(tmp),
     ]
     subprocess.run(cmd, check=True, capture_output=True)

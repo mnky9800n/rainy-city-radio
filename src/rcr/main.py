@@ -77,6 +77,7 @@ async def run(
     no_jennifer: bool,
     no_music: bool,
     test_intros_interval: float | None,
+    talk_break_every_n: int | None,
 ) -> None:
     ensure_fifo(music_fifo)
     ensure_fifo(voice_fifo)
@@ -89,6 +90,9 @@ async def run(
         ambient_path=ambient,
         output_target=output_target,
     ))
+    scheduler_kwargs: dict = {}
+    if talk_break_every_n is not None:
+        scheduler_kwargs["talk_break_every_n"] = talk_break_every_n
     jennifer = (
         None if no_jennifer
         else JenniferScheduler(
@@ -96,6 +100,7 @@ async def run(
             commercials_dir=commercials_dir,
             test_intros_interval_s=test_intros_interval,
             test_intros_music_dir=music_dir if test_intros_interval else None,
+            **scheduler_kwargs,
         )
     )
     # MusicFeeder consults the scheduler's transition planner on every
@@ -224,6 +229,10 @@ def main() -> None:
                         "every N seconds, bypassing MusicFeeder timing. Use "
                         "to verify intro/outro bake coverage without waiting "
                         "for real ~3-5min track transitions.")
+    p.add_argument("--talk-break-every-n", type=int, default=None,
+                   help="Override how often talk-breaks fire (track count). "
+                        "Default 4. Set to 1 for testing — every track "
+                        "transition becomes a talk-break attempt.")
     p.add_argument("--dry-run", action="store_true",
                    help="Write FLV to out/live_test.flv instead of YouTube RTMP.")
     p.add_argument("--dry-run-out", type=Path, default=DEFAULT_DRY_RUN_OUT)
@@ -267,6 +276,7 @@ def main() -> None:
         no_jennifer=args.no_jennifer,
         no_music=args.no_music,
         test_intros_interval=args.test_intros_interval,
+        talk_break_every_n=args.talk_break_every_n,
     ))
 
 
