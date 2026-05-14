@@ -53,4 +53,11 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] starting bake pass"
 # of monthly EL quota goes here while the catalog is being built up.
 "$UV" run python -m rcr.tools.generate_intros || true
 
+# produce_commercials: voice-synth + bed-mix each commercial in the curated
+# pool. Skip-if-fresh by default, so a fully-produced catalog is a free
+# cache pass; otherwise chips at any unbaked commercial as EL quota allows.
+# Silently no-ops if jennifer/commercial_beds/ is empty (need to run
+# download_beds first).
+"$UV" run python -m rcr.tools.produce_commercials || true
+
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] bake pass done"
