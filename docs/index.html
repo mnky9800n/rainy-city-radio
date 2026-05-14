@@ -7,9 +7,9 @@
   <title>99X — Rainy-City Radio</title>
   <link rel="icon" href="static.jpg">
   <meta property="og:title" content="99X — Rainy-City Radio">
-  <meta property="og:description" content="A queer kung-fu DJ named Jennifer who refuses to stop talking about pizza.">
+  <meta property="og:description" content="DJ Jennifer spins 24/7 trip-hop records for rainy-city.com">
   <meta property="og:image" content="static.jpg">
-  <meta name="description" content="A queer kung-fu DJ named Jennifer who refuses to stop talking about pizza.">
+  <meta name="description" content="DJ Jennifer spins 24/7 trip-hop records for rainy-city.com">
   <style>
     /* Designed for RCTV — vertical TV (~9:16) viewed from ~10 ft.
        Reads on phones too; vw/vh sizing scales gracefully. */
@@ -47,38 +47,50 @@
       z-index: 0;
       pointer-events: none;
     }
+    /* Single-column stack on every aspect: title above, QR + Jennifer
+       in the middle, tagline below. The vh/vmin caps below keep the QR
+       from blowing past the viewport on short landscape windows where
+       vmin = vh; portrait gets larger fonts and padding via media. */
     main {
       position: relative;
       z-index: 1;
       width: 100%; height: 100%;
       display: grid;
+      grid-template-areas:
+        "header"
+        "qr"
+        "footer";
       grid-template-rows: auto 1fr auto;
-      padding: 6vh 5vw;
-      gap: 4vh;
+      place-items: center;
+      padding: 4vh 4vw;
+      gap: 2vh;
     }
     /* HEADER */
-    header { text-align: center; }
+    header { grid-area: header; text-align: center; }
     h1 {
-      font-size: clamp(48px, 14vh, 220px);
+      font-size: clamp(40px, 10vh, 160px);
       margin: 0;
       letter-spacing: -0.04em;
       line-height: 0.9;
       text-shadow: 0 0.4vh 1.2vh rgba(0,0,0,0.6);
     }
     .freq {
-      font-size: clamp(16px, 3.4vh, 48px);
+      font-size: clamp(14px, 2.8vh, 36px);
       letter-spacing: 0.12em;
       opacity: 0.78;
-      margin-top: 1.2vh;
+      margin-top: 1vh;
       font-variant: small-caps;
     }
-    /* QR — must be readable from 6-15 ft. */
+    /* QR — sized to fit on either aspect (vmin alone breaks on landscape
+       because vmin = vh there; cap by vh and vw too). */
     .qr-wrap {
-      align-self: center; justify-self: center;
+      grid-area: qr;
+      position: relative;
+      isolation: isolate;
       background: var(--qr-bg);
-      padding: 3vh;
-      border-radius: 1.8vh;
-      width: clamp(220px, 60vmin, 720px);
+      padding: 2.4vmin;
+      border-radius: 1.6vmin;
+      width: min(60vmin, 46vh, 80vw);
       aspect-ratio: 1 / 1;
       display: flex; align-items: center; justify-content: center;
       box-shadow: 0 1.5vh 4vh rgba(0,0,0,0.45);
@@ -86,10 +98,27 @@
     .qr-wrap svg, .qr-wrap canvas {
       width: 100%; height: 100%; display: block;
     }
+    /* Jennifer, leaning against the QR's left side. PNG has a real alpha
+       channel. Slight overlap into the QR's padding ring sells the
+       "leaning" contact — within M-level error-correction tolerance so
+       the code still scans. max-height keeps her from blowing out the
+       viewport on landscape where 140% of QR can exceed vh. */
+    .jenn {
+      position: absolute;
+      height: 140%;
+      max-height: 82vh;
+      width: auto;
+      right: 89%;
+      bottom: -5%;
+      z-index: 2;
+      pointer-events: none;
+      user-select: none;
+      filter: drop-shadow(0 1.4vh 2vh rgba(0,0,0,0.6));
+    }
     /* FOOTER */
-    footer { text-align: center; }
+    footer { grid-area: footer; text-align: center; }
     .tagline {
-      font-size: clamp(16px, 3.4vh, 44px);
+      font-size: clamp(14px, 2.8vh, 36px);
       line-height: 1.3;
       font-style: italic;
       opacity: 0.96;
@@ -99,18 +128,38 @@
       text-shadow: 0 0.3vh 1vh rgba(0,0,0,0.7);
     }
     .cta {
-      font-size: clamp(20px, 4.2vh, 56px);
-      margin-top: 3vh;
+      font-size: clamp(18px, 3.4vh, 44px);
+      margin-top: 1.6vh;
       font-weight: bold;
       letter-spacing: 0.1em;
       color: var(--accent);
       font-variant: small-caps;
       text-shadow: 0 0.3vh 1vh rgba(0,0,0,0.7);
     }
-    /* Phone fallback — still works if someone visits on their phone */
-    @media (max-aspect-ratio: 9 / 16) {
-      main { padding: 4vh 4vw; gap: 2vh; }
+
+    /* Portrait — RCTV vertical, mobile portrait: generous single column. */
+    @media (max-aspect-ratio: 1 / 1) {
+      main { padding: 6vh 5vw; gap: 4vh; }
+      h1 { font-size: clamp(48px, 14vh, 220px); }
+      .freq { font-size: clamp(16px, 3.4vh, 48px); margin-top: 1.2vh; }
+      .qr-wrap {
+        width: min(62vmin, 56vh, 85vw);
+        padding: 3vh;
+        border-radius: 1.8vh;
+      }
+      .tagline { font-size: clamp(16px, 3.4vh, 44px); }
+      .cta { font-size: clamp(20px, 4.2vh, 56px); margin-top: 3vh; }
+      .jenn { max-height: 88vh; bottom: -5%; }
     }
+
+    /* Phone portrait (taller than 9:16) — tighter, smaller Jenn so the
+       QR still dominates. RCTV is exactly 9:16, so the breakpoint sits
+       at 1:2 to keep RCTV on the generous portrait styles. */
+    @media (max-aspect-ratio: 1 / 2) {
+      main { padding: 4vh 4vw; gap: 2vh; }
+      .jenn { height: 118%; right: 92%; bottom: -3%; }
+    }
+
   </style>
 </head>
 <body>
@@ -120,10 +169,12 @@
       <div class="freq">99.7 FM · Rainy-City Radio</div>
     </header>
 
-    <div class="qr-wrap" id="qr" aria-label="Scan to listen live"></div>
+    <div class="qr-wrap" id="qr" aria-label="Scan to listen live">
+      <img class="jenn" src="jennifer-lean.png" alt="" aria-hidden="true">
+    </div>
 
     <footer>
-      <p class="tagline">A queer kung-fu DJ named Jennifer who refuses to stop talking about pizza.</p>
+      <p class="tagline">DJ Jennifer spins 24/7 trip-hop records for rainy-city.com</p>
       <div class="cta">scan to listen →</div>
     </footer>
   </main>
@@ -140,8 +191,11 @@
     qr.addData(TARGET_URL);
     qr.make();
     // createSvgTag gives us a clean inline SVG with crisp modules.
-    document.getElementById("qr").innerHTML =
-      qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
+    // insertAdjacentHTML preserves the .jenn <img> that's also inside #qr.
+    document.getElementById("qr").insertAdjacentHTML(
+      "afterbegin",
+      qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true })
+    );
 
     // Force the SVG to fill its container regardless of cellSize.
     const svg = document.querySelector("#qr svg");
