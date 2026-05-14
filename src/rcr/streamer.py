@@ -30,13 +30,34 @@ import os
 import signal
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic as _monotonic
 
 from rcr.audio_format import CHANNELS, SAMPLE_RATE
 
 log = logging.getLogger(__name__)
 
 YOUTUBE_RTMP = "rtmp://a.rtmp.youtube.com/live2"
-RESTART_BACKOFF_S = 3.0
+
+# ffmpeg restart backoff. Mid-session crashes (network blip, transient
+# YouTube hiccup) restart fast; fast-fails (revoked stream key, bad
+# config, network fully down) back off exponentially so we don't hammer
+# YouTube. Resets to zero once ffmpeg runs long enough to count as a
+# real session.
+RESTART_BACKOFF_MIN_S = 3.0
+RESTART_BACKOFF_MAX_S = 300.0    # 5 min cap; long enough to outlast brief outages
+RESTART_RESET_THRESHOLD_S = 60.0  # ffmpeg up ≥ 60s = "real session, reset counter"
+
+
+def compute_backoff_seconds(consecutive_failures: int) -> float:
+    """Exponential backoff with a cap: 3s, 6s, 12s, 24s, …, up to 300s.
+
+    Pure function so the curve is unit-testable; the streamer's restart
+    loop reads it on every iteration.
+    """
+    if consecutive_failures <= 0:
+        return RESTART_BACKOFF_MIN_S
+    backoff = RESTART_BACKOFF_MIN_S * (2 ** consecutive_failures)
+    return min(backoff, RESTART_BACKOFF_MAX_S)
 
 
 @dataclass(frozen=True)
@@ -160,10 +181,20 @@ class Streamer:
         ]
 
     async def run(self) -> None:
-        """Run ffmpeg, restart on unclean exit, until stop() is called."""
+        """Run ffmpeg, restart on unclean exit, until stop() is called.
+
+        Exponential backoff on fast-fails: if ffmpeg dies before
+        `RESTART_RESET_THRESHOLD_S` it counts as a fast-fail and the next
+        restart waits exponentially longer (3 → 6 → 12 → 24 → … capped
+        at 300s). Once ffmpeg runs for ≥ threshold the failure counter
+        resets — the streamer recovers cheaply from one-off blips without
+        hammering YouTube during sustained outages.
+        """
+        consecutive_failures = 0
         while not self._stop.is_set():
             cmd = self.build_cmd()
             log.info("starting ffmpeg: %s", _redact_cmd(cmd))
+            start_t = _monotonic()
             self._proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -171,14 +202,25 @@ class Streamer:
                 stderr=None,  # let ffmpeg's warnings/errors hit our stderr
             )
             rc = await self._proc.wait()
+            elapsed = _monotonic() - start_t
             self._proc = None
             if self._stop.is_set():
                 log.info("ffmpeg exited (rc=%s) after stop requested", rc)
                 return
-            log.warning("ffmpeg exited unexpectedly (rc=%s); restarting in %.1fs",
-                        rc, RESTART_BACKOFF_S)
+            if elapsed >= RESTART_RESET_THRESHOLD_S:
+                if consecutive_failures > 0:
+                    log.info("ffmpeg ran %.0fs before exit — resetting backoff", elapsed)
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+            backoff = compute_backoff_seconds(consecutive_failures)
+            log.warning(
+                "ffmpeg exited unexpectedly (rc=%s, lasted %.0fs); "
+                "restart attempt #%d in %.0fs",
+                rc, elapsed, consecutive_failures + 1, backoff,
+            )
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=RESTART_BACKOFF_S)
+                await asyncio.wait_for(self._stop.wait(), timeout=backoff)
                 return  # stop fired during backoff
             except asyncio.TimeoutError:
                 pass

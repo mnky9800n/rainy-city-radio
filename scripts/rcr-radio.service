@@ -1,0 +1,63 @@
+[Unit]
+# Long-running streamer for 99X / Rainy-City Radio. Owns the single ffmpeg
+# process pushing to YouTube RTMP. Runs as the mnky9800n user on homebase.
+#
+# Install (run once):
+#     sudo cp /home/mnky9800n/repos/rainy-city-radio/scripts/rcr-radio.service /etc/systemd/system/
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now rcr-radio
+#
+# Operate:
+#     systemctl status rcr-radio        # state + last few log lines
+#     journalctl -u rcr-radio -f        # live tail
+#     journalctl -u rcr-radio -n 200    # last 200 lines
+#     sudo systemctl restart rcr-radio  # graceful restart
+#     sudo systemctl stop rcr-radio     # graceful stop (SIGTERM, 30s grace)
+#
+# Logs: stdout/stderr go to journald. Rotation is journald's job (configure
+# via /etc/systemd/journald.conf if you need to bound it; defaults are fine
+# on a 13GB disk for a 24/7 station).
+
+Description=99X — Rainy-City Radio streamer
+Documentation=https://github.com/mnky9800n/rainy-city-radio
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mnky9800n
+Group=mnky9800n
+WorkingDirectory=/home/mnky9800n/repos/rainy-city-radio
+
+# .env loads YOUTUBE_STREAM_KEY, NIM_API_KEY, ELEVENLABS_API_KEY,
+# ELEVENLABS_VOICE_ID. systemd's EnvironmentFile reads plain KEY=value
+# lines — no `export`, no shell expansion. Matches our .env format.
+EnvironmentFile=/home/mnky9800n/repos/rainy-city-radio/.env
+
+# uv lives in the user's local bin. If it moves, update both ExecStart
+# and CLAUDE.md's per-host bootstrap section.
+ExecStart=/home/mnky9800n/.local/bin/uv run python -m rcr.main
+
+# rcr.main installs a SIGTERM handler that drains the asyncio loop and
+# shuts down ffmpeg + the feeder threads cleanly. 30s is well above the
+# observed shutdown time (~2-5s); enough headroom for slow disk flush.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+# Restart on crash / non-zero exit. We do NOT restart on clean exit
+# (Type=simple + Restart=on-failure means systemctl stop is honored
+# without bouncing back up). The 10s delay is a soft backoff; the
+# streamer's own ffmpeg-restart logic has a separate 3s inner backoff.
+Restart=on-failure
+RestartSec=10s
+
+# Boring resource hygiene. Nothing about the streamer needs root-y caps.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=false
+PrivateTmp=false
+# PrivateTmp must be false — we rely on /tmp/rcr/{music,voice}.fifo being
+# real paths the streamer can mkfifo and feed.
+
+[Install]
+WantedBy=multi-user.target

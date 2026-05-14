@@ -151,7 +151,27 @@ After a fresh clone or pull on a new host, before the streamer will play anythin
 2. `python -m rcr.tools.render_bg` — produces `assets/stream_bg.png`.
 3. Drop mp3s into `music/` (the watcher in `rcr.tools.ingest_watch` tags them, or run `rcr.tools.ingest_track` per-file).
 4. `python -m rcr.tools.generate_spots` — bakes the static spot pool into `jennifer/spots/`. Idempotent (sha256-keyed cache). Pass `--dry-run` to preview without calling ElevenLabs.
-5. `python -m rcr.main` — stream.
+5. `python -m rcr.main` — stream interactively (foreground). For 24/7, use the systemd unit below.
+
+## 24/7 deployment (systemd)
+
+For continuous unattended operation:
+
+```
+sudo cp /home/mnky9800n/repos/rainy-city-radio/scripts/rcr-radio.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rcr-radio
+```
+
+Operate:
+
+- `systemctl status rcr-radio` — current state + last log lines
+- `journalctl -u rcr-radio -f` — live tail
+- `sudo systemctl restart rcr-radio` / `stop rcr-radio` — graceful (30s TimeoutStopSec)
+
+The unit runs as user `mnky9800n`, reads env from `.env` via `EnvironmentFile=`, restarts `on-failure` with a 10s delay. ffmpeg itself has internal exponential backoff (3s → 6 → 12 → … → 300s cap) on consecutive fast-fails — a permanently broken stream key won't burn CPU; a transient blip recovers fast.
+
+YouTube Studio gotcha (durable, in memory): the persistent stream key requires a manual "Go Live" click on the channel-level dashboard (`studio.youtube.com/livestreaming/dashboard`) the first time. Once auto-start is enabled in YouTube Studio's stream-key settings, future systemctl-triggered starts surface as Live automatically.
 
 ## Common commands
 
