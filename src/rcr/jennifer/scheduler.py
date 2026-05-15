@@ -69,8 +69,20 @@ DEFAULT_OUTRO_CHANCE = 0.30
 # How often (in track changes) the scheduler fires a talk-break instead of
 # inline intros. 0 disables talk-breaks entirely. ~4 means a commercial
 # segment every 4 tracks ≈ every 12-15 minutes given track lengths.
-# When triggered, the music FIFO pauses for the duration of the commercial.
+# When triggered, the music FIFO pauses for the duration of the commercial
+# break (multiple commercials may play back-to-back; see below).
 DEFAULT_TALK_BREAK_EVERY_N = 4
+
+# Real radio commercial breaks contain 1-3 spots back-to-back; we copy
+# that convention. The exact count is randomized per break, weighted
+# toward 2 so most breaks have a couple of spots and occasional breaks
+# are shorter or longer.
+TALK_BREAK_COMMERCIAL_COUNT_CHOICES = (1, 2, 2, 2, 3)
+
+# Small silent gap between commercials inside a break — about what real
+# radio cuts to between spots. Implemented as part of the music-FIFO
+# pause; voice playback just runs back-to-back through play_sequence.
+INTER_COMMERCIAL_GAP_S = 0.5
 
 # Sync wait on the planner coroutine from the music-feeder thread. Inline-
 # intro planning is sub-millisecond (filesystem stat + task create); M4.5
@@ -153,25 +165,73 @@ def pick_baked_intro_or_outro(
     return rng.choice(candidates) if candidates else None
 
 
-def select_baked_commercial(
+def _baked_commercials(
     commercials_dir: Path,
-    rng: random.Random,
-) -> tuple[Commercial, Path] | None:
-    """Pick a random commercial whose voice mp3 is baked on disk.
-
-    Returns (commercial, mp3_path) or None if nothing is baked yet.
-    Pure-ish: filesystem read + rng; no time / feeder dependency. The
-    scheduler uses this on talk-break opportunities; if it returns None
-    we fall back to inline-intro mode.
-    """
+) -> list[tuple[Commercial, Path]]:
+    """Return every commercial whose voice+bed mp3 is baked, in catalog order."""
     if not commercials_dir.exists():
-        return None
-    available: list[tuple[Commercial, Path]] = []
+        return []
+    out: list[tuple[Commercial, Path]] = []
     for c in COMMERCIALS:
         path = commercials_dir / f"{c.id}.mp3"
         if path.exists() and path.stat().st_size > 0:
-            available.append((c, path))
-    return rng.choice(available) if available else None
+            out.append((c, path))
+    return out
+
+
+def select_break_commercials(
+    commercials_dir: Path,
+    rng: random.Random,
+    n: int,
+) -> list[tuple[Commercial, Path]]:
+    """Pick `n` distinct baked commercials for a single talk-break.
+
+    Prefers category variety: round-robins through distinct categories
+    first, only repeats a category once every category is used. Random
+    within each category. Returns [] if nothing is baked yet (caller
+    falls back to inline-intro mode).
+
+    Pure-ish: filesystem read + rng; no time / feeder dependency.
+    """
+    all_baked = _baked_commercials(commercials_dir)
+    if not all_baked:
+        return []
+    if n <= 0:
+        return []
+    if len(all_baked) <= n:
+        # Catalog smaller than requested break — return everything shuffled.
+        shuffled = list(all_baked)
+        rng.shuffle(shuffled)
+        return shuffled
+
+    by_category: dict[str, list[tuple[Commercial, Path]]] = {}
+    for entry in all_baked:
+        by_category.setdefault(entry[0].category, []).append(entry)
+    categories = list(by_category.keys())
+    rng.shuffle(categories)
+
+    picks: list[tuple[Commercial, Path]] = []
+    used_ids: set[str] = set()
+
+    # First pass: one per category, distinct ids.
+    for cat in categories:
+        if len(picks) >= n:
+            break
+        pick = rng.choice(by_category[cat])
+        picks.append(pick)
+        used_ids.add(pick[0].id)
+
+    # If we still need more (more spots requested than categories available),
+    # fill from the remaining pool — still no duplicate ids.
+    while len(picks) < n:
+        remaining = [e for e in all_baked if e[0].id not in used_ids]
+        if not remaining:
+            break
+        pick = rng.choice(remaining)
+        picks.append(pick)
+        used_ids.add(pick[0].id)
+
+    return picks
 
 
 def probe_mp3_duration_s(path: Path) -> float:
@@ -384,10 +444,11 @@ class JenniferScheduler:
         self._tracks_since_talk_break += 1
         if (self.talk_break_every_n > 0
                 and self._tracks_since_talk_break >= self.talk_break_every_n):
-            pick = select_baked_commercial(self.commercials_dir, self.rng)
-            if pick is not None:
+            n_spots = self.rng.choice(TALK_BREAK_COMMERCIAL_COUNT_CHOICES)
+            picks = select_break_commercials(self.commercials_dir, self.rng, n_spots)
+            if picks:
                 self._tracks_since_talk_break = 0
-                return await self._fire_talk_break(*pick)
+                return await self._fire_talk_break(picks)
             log.debug(
                 "talk-break opportunity (%d since last) but no baked "
                 "commercials in %s — falling back to inline mode",
@@ -415,29 +476,38 @@ class JenniferScheduler:
         return 0.0
 
     async def _fire_talk_break(
-        self, commercial: Commercial, mp3_path: Path,
+        self, picks: list[tuple[Commercial, Path]],
     ) -> float:
-        """Kick off commercial playback and return its duration.
+        """Kick off a multi-commercial break and return its total duration.
 
-        The duration is what `MusicFeeder` uses to know how long to write
-        silence on the music FIFO. The commercial plays alone (well, with
-        the rain bed) during that window — no ducking-under-music since
-        there's no music to duck.
+        Duration is sum of each commercial's mp3 length + a small inter-
+        commercial gap, matching real-radio cadence. Voice playback runs
+        through `play_sequence`; the music FIFO pauses for the whole
+        window. No ducking — the commercials own the air.
         """
-        try:
-            duration_s = await asyncio.to_thread(probe_mp3_duration_s, mp3_path)
-        except Exception:
-            log.exception("ffprobe failed for %s; aborting talk-break", mp3_path)
+        if not picks:
             return 0.0
+        durations: list[float] = []
+        for commercial, mp3 in picks:
+            try:
+                d = await asyncio.to_thread(probe_mp3_duration_s, mp3)
+            except Exception:
+                log.exception("ffprobe failed for %s; aborting talk-break", mp3)
+                return 0.0
+            durations.append(d)
+        gap_total = INTER_COMMERCIAL_GAP_S * (len(picks) - 1)
+        total = sum(durations) + gap_total
+        labels = " → ".join(f"{c.id} ({c.character}, {d:.1f}s)"
+                            for (c, _), d in zip(picks, durations))
         log.info(
-            "talk-break: %s (%s, %.1fs) — pausing music FIFO",
-            commercial.id, commercial.character, duration_s,
+            "talk-break: %d spot%s, %.1fs total — %s",
+            len(picks), "" if len(picks) == 1 else "s", total, labels,
         )
         asyncio.create_task(
-            self.player.play_mp3(mp3_path),
-            name=f"jennifer_talk_break:{commercial.id}",
+            self.player.play_sequence([p[1] for p in picks]),
+            name="jennifer_talk_break",
         )
-        return duration_s
+        return total
 
     async def _play_transition(self, prev: Track | None, current: Track) -> None:
         """Pick + play the outro/intro segments for a track change."""

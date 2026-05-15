@@ -23,7 +23,7 @@ import pytest
 
 import rcr.jennifer.scheduler as scheduler_mod
 from rcr.jennifer.feeder import VoiceFeeder
-from rcr.jennifer.scheduler import JenniferScheduler
+from rcr.jennifer.scheduler import JenniferScheduler, select_break_commercials
 from rcr.music.tracks import Track
 
 
@@ -277,3 +277,92 @@ async def test_plan_transition_times_out_gracefully(tmp_path, monkeypatch):
     assert pause_s == 0.0
     # Should bail within roughly the timeout, well under 1s.
     assert elapsed < 1.0, f"plan_transition took {elapsed:.2f}s, expected < 1s"
+
+
+# ---------------------------------------------------------------------------
+# select_break_commercials — multi-commercial picker for talk-breaks
+# ---------------------------------------------------------------------------
+
+def _stamp_fake_commercial(commercials_dir: Path, commercial_id: str) -> Path:
+    """Write a placeholder mp3 at <id>.mp3 so the selector treats it as baked.
+    File contents don't matter for the selector — only existence + non-zero."""
+    commercials_dir.mkdir(exist_ok=True)
+    p = commercials_dir / f"{commercial_id}.mp3"
+    p.write_bytes(b"fake-mp3-data")
+    return p
+
+
+def test_select_break_returns_empty_when_no_commercials_baked(tmp_path):
+    assert select_break_commercials(tmp_path / "nope", Random(0), n=2) == []
+
+
+def test_select_break_returns_empty_for_zero_n(tmp_path):
+    """Defensive: caller asks for 0 commercials → empty list, not a fallback."""
+    from rcr.jennifer.commercials import COMMERCIALS
+    cdir = tmp_path / "c"
+    _stamp_fake_commercial(cdir, COMMERCIALS[0].id)
+    assert select_break_commercials(cdir, Random(0), n=0) == []
+
+
+def test_select_break_returns_distinct_picks(tmp_path):
+    """No duplicate commercial.id across the returned picks."""
+    from rcr.jennifer.commercials import COMMERCIALS
+    cdir = tmp_path / "c"
+    # Stamp 6 from the catalog onto disk.
+    for c in COMMERCIALS[:6]:
+        _stamp_fake_commercial(cdir, c.id)
+    picks = select_break_commercials(cdir, Random(0), n=3)
+    assert len(picks) == 3
+    ids = [c.id for c, _ in picks]
+    assert len(set(ids)) == 3
+
+
+def test_select_break_handles_n_larger_than_library(tmp_path):
+    """Asking for more commercials than exist → returns everything available."""
+    from rcr.jennifer.commercials import COMMERCIALS
+    cdir = tmp_path / "c"
+    for c in COMMERCIALS[:2]:
+        _stamp_fake_commercial(cdir, c.id)
+    picks = select_break_commercials(cdir, Random(0), n=5)
+    assert len(picks) == 2
+    assert {c.id for c, _ in picks} == {COMMERCIALS[0].id, COMMERCIALS[1].id}
+
+
+def test_select_break_prefers_category_variety(tmp_path):
+    """When commercials from multiple categories are available, the picker
+    should fill across distinct categories before repeating any one."""
+    from rcr.jennifer.commercials import COMMERCIALS
+    cdir = tmp_path / "c"
+    # Stamp commercials across all 5 categories so the picker has variety.
+    # Pick 2 from each available category to give the picker choice within.
+    by_cat: dict[str, list] = {}
+    for c in COMMERCIALS:
+        by_cat.setdefault(c.category, []).append(c)
+    for cat, items in by_cat.items():
+        for c in items[:2]:
+            _stamp_fake_commercial(cdir, c.id)
+    # Ask for 3 — should get one per category, all distinct.
+    rng = Random(0)
+    picks = select_break_commercials(cdir, rng, n=3)
+    assert len(picks) == 3
+    categories = [c.category for c, _ in picks]
+    # All three picks must be from DIFFERENT categories (since we have >=3 cats
+    # available, the variety pass fills before any category repeats).
+    assert len(set(categories)) == 3
+
+
+def test_select_break_repeats_categories_when_n_exceeds_distinct_cats(tmp_path):
+    """If n > number of distinct categories available, pad with non-cat-matched
+    picks (still no duplicate commercial ids)."""
+    from rcr.jennifer.commercials import COMMERCIALS
+    cdir = tmp_path / "c"
+    # Stamp 6 commercials but all from the same category — easiest: take the
+    # first 6 of a single category.
+    first_cat = COMMERCIALS[0].category
+    same_cat = [c for c in COMMERCIALS if c.category == first_cat][:6]
+    for c in same_cat:
+        _stamp_fake_commercial(cdir, c.id)
+    picks = select_break_commercials(cdir, Random(0), n=3)
+    assert len(picks) == 3
+    ids = [c.id for c, _ in picks]
+    assert len(set(ids)) == 3  # still no duplicates
