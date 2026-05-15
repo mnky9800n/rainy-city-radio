@@ -18,6 +18,10 @@ chat = ["pytchat>=0.5"]
 api = ["httpx>=0.27"]
 watch = ["watchdog>=4.0"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+# Supertonic local TTS backend — alternative to ElevenLabs for the rotating
+# commercial cast, removes the per-character cost ceiling. ONNX-based,
+# CPU-only, model auto-downloads (~50MB) from Hugging Face on first call.
+tts-local = ["supertonic>=1.2", "numpy>=1.24"]
 
 [project.scripts]
 rcr-render-bg = "rcr.tools.render_bg:main"

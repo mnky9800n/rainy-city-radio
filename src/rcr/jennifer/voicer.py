@@ -15,6 +15,14 @@ Cache key: sha256(text + voice_id + model_id + settings_json). Changing any of
 those produces a fresh entry — old cached audio survives in case we revert.
 Per-call voice_id overrides change the cache key naturally; the same text in
 two voices produces two cache entries.
+
+Hybrid backend dispatch:
+    voice_id values starting with `supertonic:` route to the local
+    Supertonic backend (see voicer_supertonic.py). Everything else is
+    treated as a raw ElevenLabs voice ID. Lets the catalog mix per-character
+    backends — Jennifer stays on premium EL for character consistency, while
+    the rotating commercial cast (Marlowe, Vince, PSB) uses Supertonic for
+    free, unlimited CPU-bound synthesis.
 """
 
 from __future__ import annotations
@@ -34,6 +42,10 @@ ELEVENLABS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 DEFAULT_MODEL = "eleven_multilingual_v2"
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_CACHE_DIR = Path("jennifer/voices")
+
+# Prefix that marks a voice_id as a Supertonic preset rather than an
+# ElevenLabs voice ID. Example: "supertonic:M3" → Supertonic male voice 3.
+SUPERTONIC_PREFIX = "supertonic:"
 
 # Locked voice settings. Do not vary at runtime — see module docstring.
 LOCKED_SETTINGS: dict[str, float | bool] = {
@@ -75,9 +87,28 @@ class Voicer:
             )
         return cls(api_key=key, voice_id=voice, cache_dir=cache_dir)
 
+    def _supertonic_backend(self):
+        """Lazily build the Supertonic voicer the first time it's needed.
+
+        Cached on the dataclass field via direct attribute set — we can't
+        use `field(default=None)` since this is a frozen dataclass and the
+        ONNX runtime + model file shouldn't load on import. So we stash it
+        via `object.__setattr__`.
+        """
+        existing = getattr(self, "_supertonic", None)
+        if existing is not None:
+            return existing
+        from rcr.jennifer.voicer_supertonic import SupertonicVoicer
+        backend = SupertonicVoicer(cache_dir=self.cache_dir)
+        object.__setattr__(self, "_supertonic", backend)
+        return backend
+
     def cache_path(self, text: str, *, voice_id: str | None = None) -> Path:
         """Cache-path lookup; pass voice_id to query a non-default voice."""
         effective = voice_id if voice_id is not None else self.voice_id
+        if effective.startswith(SUPERTONIC_PREFIX):
+            preset = effective[len(SUPERTONIC_PREFIX):]
+            return self._supertonic_backend().cache_path(text, voice_id=preset)
         return self.cache_dir / f"{self._key(text, effective)}.mp3"
 
     def synthesize(self, text: str, *, voice_id: str | None = None) -> Path:
@@ -94,6 +125,16 @@ class Voicer:
         48kHz stereo s16le.
         """
         effective_voice = voice_id if voice_id is not None else self.voice_id
+        # Supertonic backend handles its own cache + synth.
+        if effective_voice.startswith(SUPERTONIC_PREFIX):
+            preset = effective_voice[len(SUPERTONIC_PREFIX):]
+            try:
+                return self._supertonic_backend().synthesize(text, voice_id=preset)
+            except Exception as e:
+                # Surface as VoicerError for uniform error handling upstream
+                # (produce_commercials catches VoicerError specifically).
+                raise VoicerError(f"Supertonic synthesize failed: {e}") from e
+        # Otherwise: ElevenLabs path (existing behavior).
         path = self.cache_path(text, voice_id=effective_voice)
         if path.exists() and path.stat().st_size > 0:
             log.debug("voicer cache hit: %s -> %s", text[:40], path.name)
