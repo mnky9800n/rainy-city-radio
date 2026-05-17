@@ -46,10 +46,19 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Native sample rate from Supertonic — used both when writing the
-# intermediate WAV and as ffmpeg's input rate.
-SUPERTONIC_SAMPLE_RATE = 24_000
+# Native sample rate from Supertonic — confirmed via `tts.sample_rate` at
+# runtime (44100). Earlier code wrote WAVs claiming 24000Hz here; the file
+# rate header lying about the data caused playback at ~0.544x speed —
+# everything sounded super slow. Verify on model upgrades by querying
+# tts.sample_rate on first load rather than relying on this constant.
+SUPERTONIC_SAMPLE_RATE = 44_100
 SUPERTONIC_MODEL = "supertonic-3"  # current best multilingual model
+
+# Bumping this invalidates all prior cached audio — used after the
+# 24k→44.1k sample-rate fix to make sure the broken cached files
+# don't get served on the next bake pass. Increment for any future
+# change that produces different audio for the same (text, voice_id).
+CACHE_VERSION = 2
 
 # Valid voice presets the Supertonic v3 model exposes. Used only for
 # input validation; the underlying API accepts arbitrary names and
@@ -153,6 +162,7 @@ class SupertonicVoicer:
         payload = json.dumps(
             {
                 "backend": "supertonic",
+                "cache_version": CACHE_VERSION,
                 "model": self.model,
                 "voice_id": voice_id,
                 "text": text,
